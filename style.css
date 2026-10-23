@@ -231,18 +231,24 @@ html, body {
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
+  -webkit-touch-callout: none;
+  cursor: grab;
+}
+
+.fp-drag-zone:active {
+  cursor: grabbing;
 }
 
 .touch-none {
   touch-action: none;
 }
 
-/* Full Screen Player Transition */
+/* Full Screen Player — drag via --fp-drag-y (avoids fight with class transform) */
 #fullPlayer {
+  --fp-drag-y: 0px;
   transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease;
   will-change: transform, opacity;
   overscroll-behavior: none;
-  /* Allow custom vertical swipe-to-dismiss (was pan-x — blocked pull-down) */
   touch-action: none;
 }
 
@@ -254,9 +260,26 @@ html, body {
 }
 
 #fullPlayer.visible-player {
-  transform: translateY(0%);
+  transform: translateY(var(--fp-drag-y));
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
+}
+
+#fullPlayer.fp-dragging {
+  transition: none !important;
+}
+
+#fullPlayer.fp-dismissing {
+  transition: transform 0.28s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.22s ease !important;
+  --fp-drag-y: 110vh;
+  opacity: 0 !important;
+}
+
+#fullPlayerHeader {
+  min-height: 88px;
+  padding-top: 10px;
+  padding-bottom: 14px;
 }
 
 /* Toast Notification */

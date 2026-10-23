@@ -1604,124 +1604,191 @@ miniPlayerCard.addEventListener('touchend', (e) => {
   }
 }, { passive: true });
 
-// Swipe-down dismiss — prioritize header / grab zone (was blocked by touch-action: pan-x)
-let fpTouchStartY = 0;
-let fpTouchStartX = 0;
-let fpIsDragging = false;
-let fpMoved = false;
+// Swipe-down dismiss (Pointer Events + touch) — works on real phone & DevTools hand
+let fpDrag = {
+  active: false,
+  moved: false,
+  startX: 0,
+  startY: 0,
+  lastY: 0,
+  pointerId: null
+};
 
-function fpShouldIgnoreTarget(target) {
-  return !!(target.closest && (
-    target.closest('input[type="range"]') ||
-    target.closest('#bigPlayBtn') ||
-    target.closest('#nextBtn') ||
-    target.closest('#prevBtn') ||
-    target.closest('#shuffleBtn') ||
-    target.closest('#repeatBtn') ||
-    target.closest('#favoriteBtn') ||
-    target.closest('#openQueueBtn') ||
-    target.closest('#closeFullPlayerBtn') ||
-    target.closest('#changeCoverBadgeBtn') ||
-    target.closest('#artworkContainerBtn')
+function fpResetDragVisual() {
+  fullPlayer.classList.remove('fp-dragging', 'fp-dismissing');
+  fullPlayer.style.setProperty('--fp-drag-y', '0px');
+  fullPlayer.style.opacity = '';
+}
+
+function fpDismissAnimated() {
+  fullPlayer.classList.remove('fp-dragging');
+  fullPlayer.classList.add('fp-dismissing');
+  fullPlayer.style.setProperty('--fp-drag-y', '110vh');
+  fullPlayer.style.opacity = '0';
+  setTimeout(() => {
+    closeFullPlayer();
+  }, 280);
+}
+
+function fpSnapBack() {
+  fullPlayer.classList.remove('fp-dragging');
+  fullPlayer.style.opacity = '1';
+  fullPlayer.style.setProperty('--fp-drag-y', '0px');
+}
+
+function fpIsControlTarget(target) {
+  return !!(target && target.closest && target.closest(
+    '#closeFullPlayerBtn, #openQueueBtn, #bigPlayBtn, #nextBtn, #prevBtn, #shuffleBtn, #repeatBtn, #favoriteBtn, #changeCoverBadgeBtn, input[type="range"]'
   ));
 }
 
-function fpOnStart(clientX, clientY, target) {
-  if (fpShouldIgnoreTarget(target) && !target.closest('#fullPlayerHeader')) {
-    fpIsDragging = false;
-    return;
-  }
-  // Always allow drag from header / grab zone
-  const inHeader = !!(target.closest && target.closest('#fullPlayerHeader'));
-  if (!inHeader && fpShouldIgnoreTarget(target)) {
-    fpIsDragging = false;
-    return;
-  }
-  fpIsDragging = true;
-  fpMoved = false;
-  fpTouchStartY = clientY;
-  fpTouchStartX = clientX;
+function fpPointerDown(e) {
+  if (!fullPlayer.classList.contains('visible-player')) return;
+  if (fpIsControlTarget(e.target)) return;
+
+  // Mouse: only primary button
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+  fpDrag.active = true;
+  fpDrag.moved = false;
+  fpDrag.startX = e.clientX;
+  fpDrag.startY = e.clientY;
+  fpDrag.lastY = e.clientY;
+  fpDrag.pointerId = e.pointerId;
+
+  fullPlayer.classList.add('fp-dragging');
+  fullPlayer.classList.remove('fp-dismissing');
+
+  const zone = fullPlayerHeader || fullPlayer;
+  try {
+    zone.setPointerCapture(e.pointerId);
+  } catch (err) {}
 }
 
-function fpOnMove(clientX, clientY, e) {
-  if (!fpIsDragging) return;
-  const deltaY = clientY - fpTouchStartY;
-  const deltaX = Math.abs(clientX - fpTouchStartX);
-  if (deltaY > 6 && deltaY > deltaX) {
-    fpMoved = true;
-    if (e && e.cancelable) e.preventDefault();
-    fullPlayer.style.transition = 'none';
-    fullPlayer.style.transform = `translateY(${deltaY}px)`;
-    fullPlayer.style.opacity = String(Math.max(0.35, 1 - deltaY / 500));
+function fpPointerMove(e) {
+  if (!fpDrag.active) return;
+  if (fpDrag.pointerId != null && e.pointerId !== fpDrag.pointerId) return;
+
+  const dy = e.clientY - fpDrag.startY;
+  const dx = Math.abs(e.clientX - fpDrag.startX);
+  fpDrag.lastY = e.clientY;
+
+  // Only follow downward vertical drags
+  if (dy > 3 && dy >= dx * 0.85) {
+    fpDrag.moved = true;
+    if (e.cancelable) e.preventDefault();
+    const pull = Math.max(0, dy);
+    fullPlayer.style.setProperty('--fp-drag-y', pull + 'px');
+    fullPlayer.style.opacity = String(Math.max(0.35, 1 - pull / 480));
   }
 }
 
-function fpOnEnd(clientX, clientY) {
-  if (!fpIsDragging) return;
-  fpIsDragging = false;
-  const deltaY = clientY - fpTouchStartY;
-  const deltaX = Math.abs(clientX - fpTouchStartX);
+function fpPointerUp(e) {
+  if (!fpDrag.active) return;
+  if (fpDrag.pointerId != null && e.pointerId !== fpDrag.pointerId) return;
 
-  if (fpMoved && deltaY > 50 && deltaY > deltaX) {
-    fullPlayer.style.transition = 'transform 0.28s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.25s ease';
-    fullPlayer.style.transform = 'translateY(105%)';
-    fullPlayer.style.opacity = '0';
-    setTimeout(() => {
+  const dy = (e.clientY != null ? e.clientY : fpDrag.lastY) - fpDrag.startY;
+  const dx = Math.abs((e.clientX != null ? e.clientX : fpDrag.startX) - fpDrag.startX);
+  const wasMoved = fpDrag.moved;
+  const zone = fullPlayerHeader || fullPlayer;
+
+  try {
+    if (fpDrag.pointerId != null) zone.releasePointerCapture(fpDrag.pointerId);
+  } catch (err) {}
+
+  fpDrag.active = false;
+  fpDrag.pointerId = null;
+
+  if (wasMoved && dy > 70 && dy > dx) {
+    fpDismissAnimated();
+  } else if (wasMoved) {
+    fpSnapBack();
+  } else {
+    // Tap on header text/handle (not a button) → close
+    if (!fpIsControlTarget(e.target) && dy < 12 && dx < 12) {
       closeFullPlayer();
-      fullPlayer.style.transform = '';
-      fullPlayer.style.transition = '';
-      fullPlayer.style.opacity = '';
-    }, 280);
-  } else if (fpMoved) {
-    fullPlayer.style.transition = 'transform 0.24s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.2s ease';
-    fullPlayer.style.transform = 'translateY(0%)';
-    fullPlayer.style.opacity = '1';
-    setTimeout(() => {
-      fullPlayer.style.transform = '';
-      fullPlayer.style.transition = '';
-      fullPlayer.style.opacity = '';
-    }, 240);
-  }
-}
-
-fullPlayer.addEventListener('touchstart', (e) => {
-  fpOnStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
-}, { passive: true });
-
-fullPlayer.addEventListener('touchmove', (e) => {
-  fpOnMove(e.touches[0].clientX, e.touches[0].clientY, e);
-}, { passive: false });
-
-fullPlayer.addEventListener('touchend', (e) => {
-  fpOnEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
-}, { passive: true });
-
-if (fullPlayerHeader) {
-  fullPlayerHeader.addEventListener('touchstart', (e) => {
-    fpOnStart(e.touches[0].clientX, e.touches[0].clientY, fullPlayerHeader);
-  }, { passive: true });
-
-  fullPlayerHeader.addEventListener('click', (e) => {
-    if (!e.target.closest('button') && !fpMoved) {
-      closeFullPlayer();
+    } else {
+      fpSnapBack();
     }
-  });
+  }
+
+  fpDrag.moved = false;
 }
+
+function setupFullPlayerSwipe() {
+  if (!fullPlayer || !fullPlayerHeader) return;
+
+  if (window.PointerEvent) {
+    // Pointer Events: real phone + Chrome device-mode hand (no double-fire with touch)
+    fullPlayerHeader.addEventListener('pointerdown', fpPointerDown);
+    fullPlayerHeader.addEventListener('pointermove', fpPointerMove, { passive: false });
+    fullPlayerHeader.addEventListener('pointerup', fpPointerUp);
+    fullPlayerHeader.addEventListener('pointercancel', fpPointerUp);
+    fullPlayerHeader.addEventListener('lostpointercapture', () => {
+      if (fpDrag.active) {
+        fpDrag.active = false;
+        fpSnapBack();
+      }
+    });
+  } else {
+    // Legacy touch-only WebViews
+    fullPlayerHeader.addEventListener('touchstart', (e) => {
+      if (fpIsControlTarget(e.target) || !e.touches[0]) return;
+      fpDrag.active = true;
+      fpDrag.moved = false;
+      fpDrag.startX = e.touches[0].clientX;
+      fpDrag.startY = e.touches[0].clientY;
+      fpDrag.lastY = e.touches[0].clientY;
+      fpDrag.pointerId = null;
+      fullPlayer.classList.add('fp-dragging');
+    }, { passive: true });
+
+    fullPlayerHeader.addEventListener('touchmove', (e) => {
+      if (!fpDrag.active || !e.touches[0]) return;
+      const dy = e.touches[0].clientY - fpDrag.startY;
+      const dx = Math.abs(e.touches[0].clientX - fpDrag.startX);
+      fpDrag.lastY = e.touches[0].clientY;
+      if (dy > 3 && dy >= dx * 0.85) {
+        fpDrag.moved = true;
+        if (e.cancelable) e.preventDefault();
+        fullPlayer.style.setProperty('--fp-drag-y', Math.max(0, dy) + 'px');
+        fullPlayer.style.opacity = String(Math.max(0.35, 1 - dy / 480));
+      }
+    }, { passive: false });
+
+    fullPlayerHeader.addEventListener('touchend', (e) => {
+      if (!fpDrag.active) return;
+      const t = e.changedTouches[0];
+      const dy = (t ? t.clientY : fpDrag.lastY) - fpDrag.startY;
+      const dx = Math.abs((t ? t.clientX : fpDrag.startX) - fpDrag.startX);
+      const wasMoved = fpDrag.moved;
+      fpDrag.active = false;
+      if (wasMoved && dy > 70 && dy > dx) {
+        fpDismissAnimated();
+      } else if (wasMoved) {
+        fpSnapBack();
+      } else if (dy < 12 && dx < 12) {
+        closeFullPlayer();
+      } else {
+        fpSnapBack();
+      }
+      fpDrag.moved = false;
+    }, { passive: true });
+  }
+}
+
+setupFullPlayerSwipe();
 
 function openFullPlayer() {
-  fullPlayer.style.transform = '';
-  fullPlayer.style.transition = '';
-  fullPlayer.style.opacity = '';
-  fullPlayer.classList.remove('hidden-player');
+  fpResetDragVisual();
+  fullPlayer.classList.remove('hidden-player', 'fp-dismissing');
   fullPlayer.classList.add('visible-player');
 }
 
 function closeFullPlayer() {
-  fullPlayer.classList.remove('visible-player');
+  fullPlayer.classList.remove('visible-player', 'fp-dragging', 'fp-dismissing');
   fullPlayer.classList.add('hidden-player');
-  fullPlayer.style.transform = '';
-  fullPlayer.style.transition = '';
-  fullPlayer.style.opacity = '';
+  fpResetDragVisual();
 }
 
 function showToast(msg, icon = '✨') {
