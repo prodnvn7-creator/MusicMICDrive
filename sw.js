@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mm-drive-cache-v2';
+const CACHE_NAME = 'mm-drive-cache-v3';
 const STATIC_ASSETS = [
   './',
   './index.html',

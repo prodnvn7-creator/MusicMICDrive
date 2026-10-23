@@ -1,5 +1,5 @@
 /**
- * Music Melting Drive - Core Application Logic
+ * Music MIC Driver - Core Application Logic
  * Standard Apple Music iOS PWA with Smooth Crossfade & Smart Fisher-Yates Shuffle
  */
 
@@ -268,12 +268,12 @@ async function updateDynamicMesh(imgUrl) {
     root.style.setProperty('--c4', palette.c4);
     root.style.setProperty('--glow-rgb', palette.glow);
   } else {
-    // Default Apple Music neon tones
-    root.style.setProperty('--c1', '#fa233b');
-    root.style.setProperty('--c2', '#8b5cf6');
-    root.style.setProperty('--c3', '#3b82f6');
-    root.style.setProperty('--c4', '#0c0c14');
-    root.style.setProperty('--glow-rgb', '250, 35, 59');
+    // Default Music MIC Driver tones matching Image 2
+    root.style.setProperty('--c1', '#38bdf8');
+    root.style.setProperty('--c2', '#2563eb');
+    root.style.setProperty('--c3', '#06b6d4');
+    root.style.setProperty('--c4', '#121c27');
+    root.style.setProperty('--glow-rgb', '56, 189, 248');
   }
 }
 
@@ -646,7 +646,7 @@ function updateMediaSession(song) {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: song.title,
     artist: song.artist,
-    album: song.album || 'Music Melting Drive',
+    album: song.album || 'Music MIC Driver',
     artwork: [
       { src: song.coverUrl, sizes: '96x96', type: 'image/png' },
       { src: song.coverUrl, sizes: '192x192', type: 'image/png' },
@@ -873,7 +873,7 @@ function parseAudioFile(file) {
         id: songId,
         title: defaultTitle,
         artist: defaultArtist,
-        album: "Music Melting Drive",
+        album: "Music MIC Driver",
         duration: 0,
         audioBlob: file,
         audioUrl,
@@ -895,7 +895,7 @@ function parseAudioFile(file) {
             const tags = tag.tags || {};
             const title = tags.title || defaultTitle;
             const artist = tags.artist || defaultArtist;
-            const album = tags.album || "Music Melting Drive";
+            const album = tags.album || "Music MIC Driver";
             let coverBlob = null;
             let coverUrl = 'logo.png';
 
@@ -932,7 +932,7 @@ function parseAudioFile(file) {
               id: songId,
               title: defaultTitle,
               artist: defaultArtist,
-              album: "Music Melting Drive",
+              album: "Music MIC Driver",
               duration,
               audioBlob: file,
               audioUrl,
@@ -950,7 +950,7 @@ function parseAudioFile(file) {
           id: songId,
           title: defaultTitle,
           artist: defaultArtist,
-          album: "Music Melting Drive",
+          album: "Music MIC Driver",
           duration,
           audioBlob: file,
           audioUrl,

@@ -1,11 +1,11 @@
-/* Music Melting Drive - Apple Music Style Stylesheet */
+/* Music MIC Driver - Apple Music Style Stylesheet */
 
 :root {
-  --c1: #fa233b;
-  --c2: #8b5cf6;
-  --c3: #3b82f6;
-  --c4: #101018;
-  --glow-rgb: 250, 35, 59;
+  --c1: #38bdf8;
+  --c2: #2563eb;
+  --c3: #06b6d4;
+  --c4: #121c27;
+  --glow-rgb: 56, 189, 248;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
