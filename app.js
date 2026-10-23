@@ -1643,36 +1643,102 @@ miniPlayerCard.addEventListener('touchend', (e) => {
   }
 }, { passive: true });
 
-// Swipe-down dismiss (Pointer Events + touch) — works on real phone & DevTools hand
+// Swipe-down sheet: rAF + translate3d/scale ghost (smooth, Apple-Music-like)
 let fpDrag = {
   active: false,
   moved: false,
   startX: 0,
   startY: 0,
   lastY: 0,
+  lastT: 0,
+  pull: 0,
+  velocity: 0,
+  raf: 0,
   pointerId: null
 };
 
-function fpResetDragVisual() {
-  fullPlayer.classList.remove('fp-dragging', 'fp-dismissing');
-  fullPlayer.style.setProperty('--fp-drag-y', '0px');
+function fpClearInlineSheet() {
+  fullPlayer.style.transform = '';
   fullPlayer.style.opacity = '';
+  fullPlayer.style.borderRadius = '';
+  if (fullPlayerBackdropBlur) fullPlayerBackdropBlur.style.opacity = '';
+}
+
+function fpResetDragVisual() {
+  if (fpDrag.raf) {
+    cancelAnimationFrame(fpDrag.raf);
+    fpDrag.raf = 0;
+  }
+  fullPlayer.classList.remove('fp-dragging', 'fp-dismissing', 'fp-snapping');
+  fpClearInlineSheet();
+}
+
+/** Rubber-band pull + ghost scale — GPU only, no full-tree opacity thrash */
+function fpApplyPull(rawPull) {
+  const h = window.innerHeight || 700;
+  const y0 = Math.max(0, rawPull);
+  const soft = h * 0.52;
+  const resisted = y0 <= soft ? y0 : soft + (y0 - soft) * 0.28;
+  const progress = Math.min(1, resisted / (h * 0.42));
+  const scale = 1 - progress * 0.055;
+  const radius = progress * 32;
+
+  fullPlayer.style.transform = `translate3d(0, ${resisted}px, 0) scale(${scale})`;
+  fullPlayer.style.borderRadius = `${radius}px ${radius}px 0 0`;
+  // Keep sheet readable; only ease backdrop (cheap opacity on one layer)
+  if (fullPlayerBackdropBlur) {
+    fullPlayerBackdropBlur.style.opacity = String(0.5 * (1 - progress * 0.55));
+  }
+  fpDrag.pull = resisted;
+}
+
+function fpSchedulePull(rawPull) {
+  fpDrag.pull = rawPull;
+  if (fpDrag.raf) return;
+  fpDrag.raf = requestAnimationFrame(() => {
+    fpDrag.raf = 0;
+    if (!fpDrag.active && !fullPlayer.classList.contains('fp-dragging')) return;
+    fpApplyPull(fpDrag.pull);
+  });
 }
 
 function fpDismissAnimated() {
-  fullPlayer.classList.remove('fp-dragging');
+  if (fpDrag.raf) {
+    cancelAnimationFrame(fpDrag.raf);
+    fpDrag.raf = 0;
+  }
+  fullPlayer.classList.remove('fp-dragging', 'fp-snapping');
   fullPlayer.classList.add('fp-dismissing');
-  fullPlayer.style.setProperty('--fp-drag-y', '110vh');
-  fullPlayer.style.opacity = '0';
+  const h = window.innerHeight || 700;
+  fullPlayer.style.transform = `translate3d(0, ${Math.round(h * 1.08)}px, 0) scale(0.9)`;
+  fullPlayer.style.opacity = '0.35';
+  fullPlayer.style.borderRadius = '36px 36px 0 0';
   setTimeout(() => {
     closeFullPlayer();
-  }, 280);
+  }, 340);
 }
 
 function fpSnapBack() {
-  fullPlayer.classList.remove('fp-dragging');
-  fullPlayer.style.opacity = '1';
-  fullPlayer.style.setProperty('--fp-drag-y', '0px');
+  if (fpDrag.raf) {
+    cancelAnimationFrame(fpDrag.raf);
+    fpDrag.raf = 0;
+  }
+  fullPlayer.classList.remove('fp-dragging', 'fp-dismissing');
+  fullPlayer.classList.add('fp-snapping');
+  // Force one frame at current pull, then spring to identity
+  fullPlayer.style.transform = `translate3d(0, ${fpDrag.pull || 0}px, 0) scale(1)`;
+  requestAnimationFrame(() => {
+    fullPlayer.style.transform = 'translate3d(0, 0, 0) scale(1)';
+    fullPlayer.style.opacity = '1';
+    fullPlayer.style.borderRadius = '0px';
+    if (fullPlayerBackdropBlur) fullPlayerBackdropBlur.style.opacity = '';
+  });
+  setTimeout(() => {
+    fullPlayer.classList.remove('fp-snapping');
+    if (!fullPlayer.classList.contains('fp-dismissing')) {
+      fpClearInlineSheet();
+    }
+  }, 430);
 }
 
 function fpIsControlTarget(target) {
@@ -1684,8 +1750,6 @@ function fpIsControlTarget(target) {
 function fpPointerDown(e) {
   if (!fullPlayer.classList.contains('visible-player')) return;
   if (fpIsControlTarget(e.target)) return;
-
-  // Mouse: only primary button
   if (e.pointerType === 'mouse' && e.button !== 0) return;
 
   fpDrag.active = true;
@@ -1693,32 +1757,35 @@ function fpPointerDown(e) {
   fpDrag.startX = e.clientX;
   fpDrag.startY = e.clientY;
   fpDrag.lastY = e.clientY;
+  fpDrag.lastT = performance.now();
+  fpDrag.velocity = 0;
+  fpDrag.pull = 0;
   fpDrag.pointerId = e.pointerId;
 
   fullPlayer.classList.add('fp-dragging');
-  fullPlayer.classList.remove('fp-dismissing');
+  fullPlayer.classList.remove('fp-dismissing', 'fp-snapping');
 
   const zone = fullPlayerHeader || fullPlayer;
-  try {
-    zone.setPointerCapture(e.pointerId);
-  } catch (err) {}
+  try { zone.setPointerCapture(e.pointerId); } catch (err) {}
 }
 
 function fpPointerMove(e) {
   if (!fpDrag.active) return;
   if (fpDrag.pointerId != null && e.pointerId !== fpDrag.pointerId) return;
 
+  const now = performance.now();
   const dy = e.clientY - fpDrag.startY;
   const dx = Math.abs(e.clientX - fpDrag.startX);
+  const dt = Math.max(8, now - fpDrag.lastT);
+  const instantV = (e.clientY - fpDrag.lastY) / dt;
+  fpDrag.velocity = fpDrag.velocity * 0.7 + instantV * 0.3;
   fpDrag.lastY = e.clientY;
+  fpDrag.lastT = now;
 
-  // Only follow downward vertical drags
-  if (dy > 3 && dy >= dx * 0.85) {
+  if (dy > 2 && dy >= dx * 0.75) {
     fpDrag.moved = true;
     if (e.cancelable) e.preventDefault();
-    const pull = Math.max(0, dy);
-    fullPlayer.style.setProperty('--fp-drag-y', pull + 'px');
-    fullPlayer.style.opacity = String(Math.max(0.35, 1 - pull / 480));
+    fpSchedulePull(dy);
   }
 }
 
@@ -1730,6 +1797,8 @@ function fpPointerUp(e) {
   const dx = Math.abs((e.clientX != null ? e.clientX : fpDrag.startX) - fpDrag.startX);
   const wasMoved = fpDrag.moved;
   const zone = fullPlayerHeader || fullPlayer;
+  const flickDown = fpDrag.velocity > 0.65;
+  const dismissByDistance = dy > Math.min(120, (window.innerHeight || 700) * 0.18);
 
   try {
     if (fpDrag.pointerId != null) zone.releasePointerCapture(fpDrag.pointerId);
@@ -1738,17 +1807,14 @@ function fpPointerUp(e) {
   fpDrag.active = false;
   fpDrag.pointerId = null;
 
-  if (wasMoved && dy > 70 && dy > dx) {
+  if (wasMoved && dy > dx && (dismissByDistance || (flickDown && dy > 36))) {
     fpDismissAnimated();
   } else if (wasMoved) {
     fpSnapBack();
+  } else if (!fpIsControlTarget(e.target) && dy < 12 && dx < 12) {
+    fpDismissAnimated();
   } else {
-    // Tap on header text/handle (not a button) → close
-    if (!fpIsControlTarget(e.target) && dy < 12 && dx < 12) {
-      closeFullPlayer();
-    } else {
-      fpSnapBack();
-    }
+    fpSnapBack();
   }
 
   fpDrag.moved = false;
@@ -1758,7 +1824,6 @@ function setupFullPlayerSwipe() {
   if (!fullPlayer || !fullPlayerHeader) return;
 
   if (window.PointerEvent) {
-    // Pointer Events: real phone + Chrome device-mode hand (no double-fire with touch)
     fullPlayerHeader.addEventListener('pointerdown', fpPointerDown);
     fullPlayerHeader.addEventListener('pointermove', fpPointerMove, { passive: false });
     fullPlayerHeader.addEventListener('pointerup', fpPointerUp);
@@ -1770,7 +1835,6 @@ function setupFullPlayerSwipe() {
       }
     });
   } else {
-    // Legacy touch-only WebViews
     fullPlayerHeader.addEventListener('touchstart', (e) => {
       if (fpIsControlTarget(e.target) || !e.touches[0]) return;
       fpDrag.active = true;
@@ -1778,20 +1842,26 @@ function setupFullPlayerSwipe() {
       fpDrag.startX = e.touches[0].clientX;
       fpDrag.startY = e.touches[0].clientY;
       fpDrag.lastY = e.touches[0].clientY;
+      fpDrag.lastT = performance.now();
+      fpDrag.velocity = 0;
       fpDrag.pointerId = null;
       fullPlayer.classList.add('fp-dragging');
+      fullPlayer.classList.remove('fp-snapping', 'fp-dismissing');
     }, { passive: true });
 
     fullPlayerHeader.addEventListener('touchmove', (e) => {
       if (!fpDrag.active || !e.touches[0]) return;
+      const now = performance.now();
       const dy = e.touches[0].clientY - fpDrag.startY;
       const dx = Math.abs(e.touches[0].clientX - fpDrag.startX);
+      const dt = Math.max(8, now - fpDrag.lastT);
+      fpDrag.velocity = fpDrag.velocity * 0.7 + ((e.touches[0].clientY - fpDrag.lastY) / dt) * 0.3;
       fpDrag.lastY = e.touches[0].clientY;
-      if (dy > 3 && dy >= dx * 0.85) {
+      fpDrag.lastT = now;
+      if (dy > 2 && dy >= dx * 0.75) {
         fpDrag.moved = true;
         if (e.cancelable) e.preventDefault();
-        fullPlayer.style.setProperty('--fp-drag-y', Math.max(0, dy) + 'px');
-        fullPlayer.style.opacity = String(Math.max(0.35, 1 - dy / 480));
+        fpSchedulePull(dy);
       }
     }, { passive: false });
 
@@ -1801,13 +1871,14 @@ function setupFullPlayerSwipe() {
       const dy = (t ? t.clientY : fpDrag.lastY) - fpDrag.startY;
       const dx = Math.abs((t ? t.clientX : fpDrag.startX) - fpDrag.startX);
       const wasMoved = fpDrag.moved;
+      const flickDown = fpDrag.velocity > 0.65;
       fpDrag.active = false;
-      if (wasMoved && dy > 70 && dy > dx) {
+      if (wasMoved && dy > dx && (dy > 120 || (flickDown && dy > 36))) {
         fpDismissAnimated();
       } else if (wasMoved) {
         fpSnapBack();
       } else if (dy < 12 && dx < 12) {
-        closeFullPlayer();
+        fpDismissAnimated();
       } else {
         fpSnapBack();
       }
@@ -1820,12 +1891,12 @@ setupFullPlayerSwipe();
 
 function openFullPlayer() {
   fpResetDragVisual();
-  fullPlayer.classList.remove('hidden-player', 'fp-dismissing');
+  fullPlayer.classList.remove('hidden-player', 'fp-dismissing', 'fp-snapping');
   fullPlayer.classList.add('visible-player');
 }
 
 function closeFullPlayer() {
-  fullPlayer.classList.remove('visible-player', 'fp-dragging', 'fp-dismissing');
+  fullPlayer.classList.remove('visible-player', 'fp-dragging', 'fp-dismissing', 'fp-snapping');
   fullPlayer.classList.add('hidden-player');
   fpResetDragVisual();
 }

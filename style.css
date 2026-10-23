@@ -243,43 +243,76 @@ html, body {
   touch-action: none;
 }
 
-/* Full Screen Player — drag via --fp-drag-y (avoids fight with class transform) */
+/* Full Screen Player — GPU sheet drag (ghost scale + translate3d) */
 #fullPlayer {
-  --fp-drag-y: 0px;
-  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease;
-  will-change: transform, opacity;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease, border-radius 0.35s ease;
+  will-change: transform;
   overscroll-behavior: none;
   touch-action: none;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
 
 #fullPlayer.hidden-player {
-  transform: translateY(105%);
+  transform: translate3d(0, 105%, 0) scale(0.96);
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
 }
 
 #fullPlayer.visible-player {
-  transform: translateY(var(--fp-drag-y));
+  transform: translate3d(0, 0, 0) scale(1);
   opacity: 1;
   pointer-events: auto;
   visibility: visible;
 }
 
+/* During drag: no CSS transition fighting the finger */
 #fullPlayer.fp-dragging {
+  transition: none !important;
+  will-change: transform;
+}
+
+/* Soften expensive blur while dragging → less stutter */
+#fullPlayer.fp-dragging #fullPlayerBackdropBlur {
+  transition: none !important;
+  filter: blur(18px) !important;
+}
+
+#fullPlayer.fp-dragging .artwork-img {
   transition: none !important;
 }
 
+/* Spring snap-back */
+#fullPlayer.fp-snapping {
+  transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 0.35s ease,
+              border-radius 0.42s ease !important;
+}
+
+/* Dismiss fly-away */
 #fullPlayer.fp-dismissing {
-  transition: transform 0.28s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.22s ease !important;
-  --fp-drag-y: 110vh;
-  opacity: 0 !important;
+  transition: transform 0.34s cubic-bezier(0.4, 0.0, 0.2, 1),
+              opacity 0.28s ease,
+              border-radius 0.34s ease !important;
+  pointer-events: none;
 }
 
 #fullPlayerHeader {
-  min-height: 88px;
-  padding-top: 10px;
-  padding-bottom: 14px;
+  min-height: 96px;
+  padding-top: 12px;
+  padding-bottom: 16px;
+}
+
+#swipeHandle {
+  transition: background-color 0.2s ease, transform 0.2s ease, width 0.2s ease;
+}
+
+#fullPlayer.fp-dragging #swipeHandle {
+  background-color: rgba(255, 255, 255, 0.65);
+  width: 3.25rem;
+  transform: scaleY(1.35);
 }
 
 /* Toast Notification */
