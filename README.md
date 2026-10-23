@@ -1,6 +1,8 @@
 # 🎵 Music Melting Drive (MM Drive)
 > **Trình phát nhạc Offline cá nhân theo chuẩn PWA mang phong cách iOS Apple Music.**
 
+🌐 **Link ứng dụng trực tiếp:** [https://prodnvn7-creator.github.io/MusicMICDrive/](https://prodnvn7-creator.github.io/MusicMICDrive/)
+
 Ứng dụng chạy mượt mà trên cả **iOS (Safari)** và **Android (Chrome)**, có thể cài đặt trực tiếp vào màn hình chính (Add to Home Screen) và hoạt động **100% Offline**.
 
 ---
