@@ -289,3 +289,19 @@ html, body {
   min-width: 2%;
   transition: width 0.25s ease-out;
 }
+
+#scanProgressBar.scan-bar-indeterminate {
+  width: 38% !important;
+  min-width: 38%;
+  transition: none;
+  animation: scanIndeterminate 1.05s ease-in-out infinite;
+}
+
+@keyframes scanIndeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+
+#scanProgressOverlay .scan-progress-track {
+  overflow: hidden;
+}

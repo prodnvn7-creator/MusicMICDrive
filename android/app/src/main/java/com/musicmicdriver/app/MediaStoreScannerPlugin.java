@@ -125,18 +125,8 @@ public class MediaStoreScannerPlugin extends Plugin {
                             Uri contentUri = ContentUris.withAppendedId(collection, id);
                             Uri albumArtUri = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId);
 
-                            if (duration <= 0) {
-                                try {
-                                    android.media.MediaMetadataRetriever mmr = new android.media.MediaMetadataRetriever();
-                                    mmr.setDataSource(path);
-                                    String durStr = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);
-                                    if (durStr != null) {
-                                        duration = Long.parseLong(durStr);
-                                    }
-                                    mmr.release();
-                                } catch (Exception ignored) {}
-                            }
-
+                            // Skip MediaMetadataRetriever (very slow on 300+ tracks).
+                            // Use MediaStore duration, else quick size estimate.
                             if (duration <= 0) {
                                 long actualSize = size > 0 ? size : f.length();
                                 if (actualSize > 0) {

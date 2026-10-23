@@ -855,57 +855,114 @@ const scanProgressTitle   = document.getElementById('scanProgressTitle');
 const scanProgressSub     = document.getElementById('scanProgressSub');
 const scanProgressFile    = document.getElementById('scanProgressFile');
 
-function showScanProgress(total) {
+function yieldToUI() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Show load bar immediately — before any scan work starts. */
+function beginPhoneScanProgress(subText) {
   if (!scanProgressOverlay) return;
+  scanProgressBar.classList.add('scan-bar-indeterminate');
+  scanProgressBar.style.width = '38%';
+  scanProgressCount.textContent = '…';
+  scanProgressPct.textContent = '';
+  scanProgressTitle.textContent = 'Đang quét toàn bộ điện thoại';
+  scanProgressSub.textContent = subText || 'Quét toàn bộ bộ nhớ máy tìm nhạc…';
+  scanProgressFile.textContent = 'Vui lòng chờ, không tắt ứng dụng';
+  scanProgressOverlay.classList.remove('hidden');
+  scanProgressOverlay.classList.add('flex');
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
+  if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
+}
+
+function showScanProgress(total, titleText) {
+  if (!scanProgressOverlay) return;
+  scanProgressBar.classList.remove('scan-bar-indeterminate');
   scanProgressBar.style.width = '0%';
   scanProgressCount.textContent = `0 / ${total}`;
   scanProgressPct.textContent = '0%';
-  scanProgressTitle.textContent = 'Đang quét nhạc...';
-  scanProgressSub.textContent = `Tìm thấy ${total} file âm thanh`;
-  scanProgressFile.textContent = 'Đang xử lý...';
+  scanProgressTitle.textContent = titleText || 'Đang nạp nhạc vào thư viện';
+  scanProgressSub.textContent = total > 0
+    ? `Đã tìm thấy ${total} bài — đang lưu siêu tốc…`
+    : 'Đang xử lý…';
+  scanProgressFile.textContent = 'Vui lòng chờ…';
   scanProgressOverlay.classList.remove('hidden');
   scanProgressOverlay.classList.add('flex');
 }
 
 function updateScanProgress(done, total, currentFileName) {
   if (!scanProgressOverlay) return;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  scanProgressBar.classList.remove('scan-bar-indeterminate');
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
   scanProgressBar.style.width = `${pct}%`;
   scanProgressCount.textContent = `${done} / ${total}`;
   scanProgressPct.textContent = `${pct}%`;
   if (currentFileName) scanProgressFile.textContent = currentFileName;
 }
 
+function updateScanDiscoverCount(foundCount) {
+  if (!scanProgressOverlay) return;
+  scanProgressTitle.textContent = 'Đang quét toàn bộ điện thoại';
+  scanProgressSub.textContent = `Đã tìm thấy ${foundCount} bài hát…`;
+  scanProgressCount.textContent = String(foundCount);
+  scanProgressFile.textContent = 'Đang duyệt thư mục trên máy…';
+}
+
 function hideScanProgress(addedCount, total) {
   if (!scanProgressOverlay) return;
+  scanProgressBar.classList.remove('scan-bar-indeterminate');
   scanProgressBar.style.width = '100%';
-  scanProgressCount.textContent = `${addedCount} / ${total}`;
+  scanProgressCount.textContent = `${addedCount} / ${total || addedCount}`;
   scanProgressPct.textContent = '100%';
   scanProgressTitle.textContent = 'Hoàn tất!';
   scanProgressSub.textContent = `Đã thêm ${addedCount} bài vào thư viện`;
   scanProgressFile.textContent = '';
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét';
+  if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
   setTimeout(() => {
     scanProgressOverlay.classList.add('hidden');
     scanProgressOverlay.classList.remove('flex');
-  }, 1400);
+  }, 1200);
 }
 
-// Deep recursive directory reader (showDirectoryPicker API)
-async function scanDirectoryRecursively(dirHandle) {
+function abortScanProgress() {
+  if (!scanProgressOverlay) return;
+  scanProgressBar.classList.remove('scan-bar-indeterminate');
+  scanProgressOverlay.classList.add('hidden');
+  scanProgressOverlay.classList.remove('flex');
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét';
+  if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
+}
+
+const SKIP_SCAN_DIRS = new Set([
+  'android', '.android', 'data', 'obb', 'cache', '.cache', 'thumbnails', '.thumbnails',
+  'lost+found', 'notifications', 'alarms', 'ringtones', 'ui', 'fonts', 'log', 'logs'
+]);
+
+// Deep recursive directory reader (showDirectoryPicker API) — full phone storage
+async function scanDirectoryRecursively(dirHandle, onProgress) {
   const files = [];
-  async function traverse(handle) {
+  async function traverse(handle, depth) {
     for await (const entry of handle.values()) {
       if (entry.kind === 'file') {
         try {
           const file = await entry.getFile();
-          if (isAudioFile(file)) files.push(file);
+          if (isAudioFile(file)) {
+            files.push(file);
+            if (onProgress && (files.length % 12 === 0)) onProgress(files.length);
+          }
         } catch (e) { /* skip locked files */ }
       } else if (entry.kind === 'directory') {
-        try { await traverse(entry); } catch (e) { /* skip inaccessible dirs */ }
+        const name = (entry.name || '').toLowerCase();
+        // Skip heavy system folders when scanning from storage root (keeps Music/Download/Zalo)
+        if (depth === 0 && SKIP_SCAN_DIRS.has(name)) continue;
+        if (name.startsWith('.') && name !== '.music') continue;
+        try { await traverse(entry, depth + 1); } catch (e) { /* skip inaccessible dirs */ }
       }
     }
   }
-  await traverse(dirHandle);
+  await traverse(dirHandle, 0);
+  if (onProgress) onProgress(files.length);
   return files;
 }
 
@@ -1131,17 +1188,22 @@ async function fastGetAudioDuration(file) {
 
 
 /**
- * FAST ULTRA-RELIABLE audio import engine.
- * Phase 1: Instantly add all files with binary header parsed duration (appears in <2s for 371 songs).
- * Phase 2: Background ID3 enrichment (cover art, proper title/artist) without blocking UI.
+ * Ultra-fast import: no per-file header await in the hot path.
+ * Duration is estimated instantly, then repaired in background.
  */
 async function handleAudioFiles(files) {
-  if (!files || files.length === 0) return;
+  if (!files || files.length === 0) {
+    abortScanProgress();
+    return;
+  }
+
+  if (!scanProgressOverlay || scanProgressOverlay.classList.contains('hidden')) {
+    beginPhoneScanProgress('Đang lọc file nhạc trên máy…');
+  }
 
   // ── Step 1: Audio detection with 3-layer fallback ──────────
   let validFiles = Array.from(files).filter(f => isAudioFile(f));
 
-  // Layer 2: Check extension only (for Android files with wrong MIME)
   if (validFiles.length === 0) {
     validFiles = Array.from(files).filter(f => {
       const name = (f.name || '').toLowerCase();
@@ -1149,7 +1211,6 @@ async function handleAudioFiles(files) {
     });
   }
 
-  // Layer 3: Exclude obvious non-audio (images, docs) — catch-all for Zalo/WhatsApp audio
   if (validFiles.length === 0) {
     const SKIP = ['.jpg','.jpeg','.png','.gif','.webp','.bmp','.pdf','.txt','.doc','.docx','.xls','.xlsx','.zip','.apk','.exe','.xml','.json'];
     validFiles = Array.from(files).filter(f => {
@@ -1159,39 +1220,46 @@ async function handleAudioFiles(files) {
   }
 
   if (validFiles.length === 0) {
-    showToast('Không tìm thấy file nhạc nào trong các file đã chọn', '⚠️');
+    abortScanProgress();
+    showToast('Không tìm thấy file nhạc nào', '⚠️');
     return;
   }
 
-  // ── Step 2: Deduplication ───────────────────────────────────
-  const newFiles = validFiles.filter(file =>
-    !state.songs.some(s => s.fileName === file.name && Math.abs(s.fileSize - file.size) < 512)
+  const existingKeys = new Set(
+    state.songs.map(s => `${s.fileName}__${s.fileSize || 0}`)
   );
 
-  if (newFiles.length === 0) {
-    showToast(`✅ Tất cả ${validFiles.length} bài đã có trong thư viện!`, '✅');
+  const seen = new Set();
+  const uniqueFiles = [];
+  for (let i = 0; i < validFiles.length; i++) {
+    const file = validFiles[i];
+    const key = `${file.name}__${file.size}`;
+    if (seen.has(key) || existingKeys.has(key)) continue;
+    // Near-dup by name+size tolerance
+    let dup = false;
+    for (const s of state.songs) {
+      if (s.fileName === file.name && Math.abs((s.fileSize || 0) - file.size) < 512) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+    seen.add(key);
+    uniqueFiles.push(file);
+  }
+
+  if (uniqueFiles.length === 0) {
+    abortScanProgress();
+    showToast(`Tất cả ${validFiles.length} bài đã có trong thư viện`, '✅');
     return;
   }
 
-  // Self-dedup within the selection
-  const seen = new Set();
-  const uniqueFiles = newFiles.filter(f => {
-    const key = `${f.name}__${f.size}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
   const total = uniqueFiles.length;
-  showScanProgress(total);
-
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
-  if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
+  showScanProgress(total, 'Đang nạp nhạc vào thư viện');
 
   const baseTs = Date.now();
   const newSongs = [];
 
-  // Instant filename-based parse + fast header duration (<0.2ms per song)
   for (let i = 0; i < uniqueFiles.length; i++) {
     const file = uniqueFiles[i];
     const songId = 'mm_' + baseTs + '_' + i + '_' + Math.random().toString(36).substring(2, 6);
@@ -1202,16 +1270,11 @@ async function handleAudioFiles(files) {
     if (title.includes(' - ')) {
       const parts = title.split(' - ');
       artist = parts[0].trim();
-      title  = parts.slice(1).join(' - ').trim();
+      title = parts.slice(1).join(' - ').trim();
     }
 
-    // Fast header parse (<0.2ms per track)
-    let duration = 0;
-    try {
-      duration = await fastGetAudioDuration(file);
-    } catch (e) {
-      duration = Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
-    }
+    // Instant size estimate — accurate duration fixed in background
+    const duration = Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
 
     newSongs.push({
       id: songId,
@@ -1228,12 +1291,13 @@ async function handleAudioFiles(files) {
       addedAt: baseTs + (total - i) * 10
     });
 
-    if (i % 20 === 0 || i === total - 1) {
+    if (i % 25 === 0 || i === total - 1) {
       updateScanProgress(i + 1, total, title);
+      await yieldToUI();
     }
   }
 
-  // Save all songs in 1 fast batch transaction to IndexedDB (~50ms for 371 songs)
+  updateScanProgress(total, total, 'Đang lưu vào máy…');
   await dbAddSongsBatch(newSongs);
 
   state.songs = [
@@ -1251,11 +1315,6 @@ async function handleAudioFiles(files) {
   }
 
   hideScanProgress(newSongs.length, total);
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét';
-  if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
-
-  showToast(`🎉 Đã nạp ${newSongs.length} bài hát! Tổng: ${state.songs.length} bài`, '🎵');
-  // Correct list durations in background (metadata is ground truth for real files)
   repairDurationsInBackground(newSongs).catch(() => {});
 }
 
@@ -1690,41 +1749,38 @@ function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Native Android MediaStore Audio Scanner (Automatic Zero-Prompt 371+ Song Detection)
+// Native Android MediaStore — full-device audio index
 async function scanAllAudioNative() {
   if (!window.Capacitor || !window.Capacitor.Plugins || !window.Capacitor.Plugins.MediaStoreScanner) {
-    // Stay on-device: folder scan instead of cloud-capable file picker
+    beginPhoneScanProgress('Chọn thư mục Bộ nhớ trong để quét cả máy…');
     if (scanFolderInput) scanFolderInput.click();
     return;
   }
 
-  showToast('⚡ Đang tự động quét toàn bộ bài hát trong máy...', '⏳');
-  showScanProgress(100);
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
-  if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
+  beginPhoneScanProgress('Đang quét toàn bộ MediaStore trên máy…');
 
   try {
     const res = await window.Capacitor.Plugins.MediaStoreScanner.scanAllAudio();
     if (res && res.songs && res.songs.length > 0) {
+      updateScanDiscoverCount(res.songs.length);
+      await yieldToUI();
       await handleNativeSongs(res.songs);
     } else {
-      hideScanProgress(0, 0);
+      abortScanProgress();
       showToast('Không tìm thấy bài hát nào trên thiết bị', '⚠️');
     }
   } catch (err) {
     console.warn('Native MediaStore scan error:', err);
-    hideScanProgress(0, 0);
+    abortScanProgress();
     showToast('Chưa cấp quyền bộ nhớ: ' + (err.message || err), '⚠️');
-    if (scanAudioInput) scanAudioInput.click();
-  } finally {
-    if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét nhạc';
-    if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
+    beginPhoneScanProgress('Chọn thư mục Bộ nhớ trong để quét cả máy…');
+    if (scanFolderInput) scanFolderInput.click();
   }
 }
 
 async function handleNativeSongs(nativeList) {
   const total = nativeList.length;
-  showScanProgress(total);
+  showScanProgress(total, 'Đang nạp nhạc vào thư viện');
 
   let addedCount = 0;
   const newSongs = [];
@@ -1739,12 +1795,15 @@ async function handleNativeSongs(nativeList) {
         audioUrl = window.Capacitor.convertFileSrc(item.path);
       }
 
-      let duration = (typeof item.duration === 'number' && item.duration > 0) ? item.duration : 0;
+      // Plugin already returns seconds
+      let duration = (typeof item.duration === 'number' && item.duration > 0)
+        ? Math.round(item.duration)
+        : 0;
       if (duration <= 0 && item.size > 0) {
         duration = Math.max(15, Math.round((item.size * 8) / (160 * 1000)));
       }
 
-      const songData = {
+      newSongs.push({
         id: item.id || ('mm_nat_' + baseTs + '_' + i),
         title: item.title,
         artist: item.artist,
@@ -1759,19 +1818,19 @@ async function handleNativeSongs(nativeList) {
         fileName: item.fileName,
         fileSize: item.size,
         addedAt: item.addedAt || (baseTs + (total - i) * 10),
-        isNative: true
-      };
-
-      newSongs.push(songData);
+        isNative: true,
+        _durationVerified: duration > 0
+      });
       addedCount++;
     }
 
-    if (i % 20 === 0 || i === total - 1) {
-      updateScanProgress(i + 1, total, item.title);
+    if (i % 40 === 0 || i === total - 1) {
+      updateScanProgress(i + 1, total, item.title || '…');
+      await yieldToUI();
     }
   }
 
-  // 1 fast batch write (~40ms)
+  updateScanProgress(total, total, 'Đang lưu vào máy…');
   await dbAddSongsBatch(newSongs);
 
   if (addedCount > 0) {
@@ -1791,7 +1850,6 @@ async function handleNativeSongs(nativeList) {
   }
 
   hideScanProgress(addedCount, total);
-  showToast(`🎉 Tự động quét sạch ${addedCount} bài hát trong máy! Tổng: ${state.songs.length} bài`, '🎵');
 }
 
 // ==========================================
@@ -1803,27 +1861,40 @@ function setupEventHandlers() {
    * APK → MediaStore; Web/PWA → chọn thư mục bộ nhớ máy (đệ quy local).
    */
   async function triggerLocalStorageScan() {
+    // Progress bar immediately — user always sees load from the first tap
+    beginPhoneScanProgress('Đang chuẩn bị quét toàn bộ điện thoại…');
+
     if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-      scanAllAudioNative();
+      await scanAllAudioNative();
       return;
     }
+
     if ('showDirectoryPicker' in window) {
       try {
+        beginPhoneScanProgress('Chọn Bộ nhớ trong / thẻ nhớ để quét cả máy…');
         const dirHandle = await window.showDirectoryPicker();
-        showToast('⚡ Đang quét bộ nhớ máy...', '⏳');
-        const files = await scanDirectoryRecursively(dirHandle);
+        beginPhoneScanProgress('Đang quét toàn bộ thư mục trên máy…');
+        const files = await scanDirectoryRecursively(dirHandle, (found) => {
+          updateScanDiscoverCount(found);
+        });
         if (files.length > 0) {
-          handleAudioFiles(files);
+          await handleAudioFiles(files);
         } else {
+          abortScanProgress();
           showToast('Không tìm thấy file âm thanh trong thư mục này', '⚠️');
         }
         return;
       } catch (err) {
-        if (err.name === 'AbortError') return;
+        if (err.name === 'AbortError') {
+          abortScanProgress();
+          return;
+        }
         console.warn('showDirectoryPicker fallback:', err);
       }
     }
-    // Fallback: webkitdirectory (still local device storage, not cloud)
+
+    // Fallback: webkitdirectory — keep load bar visible while system picker opens
+    beginPhoneScanProgress('Chọn Bộ nhớ trong rồi bấm Chọn tất cả…');
     if (scanFolderInput) scanFolderInput.click();
   }
 
@@ -1864,15 +1935,21 @@ function setupEventHandlers() {
   if (scanFolderInput) {
     scanFolderInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length > 0) {
+        beginPhoneScanProgress(`Đã chọn ${e.target.files.length} file — đang lọc nhạc…`);
         handleAudioFiles(e.target.files);
         scanFolderInput.value = '';
+      } else {
+        abortScanProgress();
       }
     });
+    // User cancelled system picker (focus returns with no files)
+    scanFolderInput.addEventListener('cancel', () => abortScanProgress());
   }
 
   if (freeFileInput) {
     freeFileInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length > 0) {
+        beginPhoneScanProgress(`Đang nạp ${e.target.files.length} file…`);
         handleAudioFiles(e.target.files);
         freeFileInput.value = '';
       }
