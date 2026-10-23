@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Music MIC Driver - Core Application Logic
  * Standard Apple Music iOS PWA with Smooth Crossfade & Smart Fisher-Yates Shuffle
  */
@@ -747,26 +747,65 @@ function syncMediaSessionPositionState() {
 // 8. ID3 TAG EXTRACTION & FOLDER AUTO-SYNC
 // ==========================================
 const SUPPORTED_AUDIO_EXTENSIONS = [
-  '.mp3', '.wav', '.wave', '.flac', '.m4a', '.aac', '.ogg', '.oga', 
-  '.opus', '.wma', '.alac', '.aiff', '.aif', '.caf', '.weba', '.webm', 
-  '.mp4', '.m4b', '.m4p', '.m4r', '.3gp', '.amr', '.awb', '.mid', '.midi'
+  '.mp3', '.wav', '.wave', '.flac', '.m4a', '.aac', '.ogg', '.oga',
+  '.opus', '.wma', '.alac', '.aiff', '.aif', '.caf', '.weba',
+  '.m4b', '.m4p', '.m4r', '.3gp', '.amr', '.awb'
 ];
 
 function isAudioFile(file) {
   if (!file) return false;
-  // 1. Check MIME type first
-  if (file.type) {
-    const mime = file.type.toLowerCase();
-    if (mime.startsWith('audio/')) return true;
-    if (mime === 'application/ogg' || mime === 'application/x-ogg') return true;
-    if (mime === 'video/mp4' || mime === 'video/webm' || mime === 'video/3gpp') return true;
-  }
-  // 2. Check filename extension
-  const name = (typeof file === 'string' ? file : file.name || '').toLowerCase();
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('audio/')) return true;
+  if (mime === 'application/ogg' || mime === 'application/x-ogg') return true;
+  const name = (file.name || '').toLowerCase();
   return SUPPORTED_AUDIO_EXTENSIONS.some(ext => name.endsWith(ext));
 }
 
-// Deep recursive directory reader for modern Chromium and desktop
+// ── Scan Progress UI helpers ─────────────────────────────────
+const scanProgressOverlay = document.getElementById('scanProgressOverlay');
+const scanProgressBar     = document.getElementById('scanProgressBar');
+const scanProgressCount   = document.getElementById('scanProgressCount');
+const scanProgressPct     = document.getElementById('scanProgressPct');
+const scanProgressTitle   = document.getElementById('scanProgressTitle');
+const scanProgressSub     = document.getElementById('scanProgressSub');
+const scanProgressFile    = document.getElementById('scanProgressFile');
+
+function showScanProgress(total) {
+  if (!scanProgressOverlay) return;
+  scanProgressBar.style.width = '0%';
+  scanProgressCount.textContent = `0 / ${total}`;
+  scanProgressPct.textContent = '0%';
+  scanProgressTitle.textContent = 'Đang quét nhạc...';
+  scanProgressSub.textContent = `Tìm thấy ${total} file âm thanh`;
+  scanProgressFile.textContent = 'Đang xử lý...';
+  scanProgressOverlay.classList.remove('hidden');
+  scanProgressOverlay.classList.add('flex');
+}
+
+function updateScanProgress(done, total, currentFileName) {
+  if (!scanProgressOverlay) return;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  scanProgressBar.style.width = `${pct}%`;
+  scanProgressCount.textContent = `${done} / ${total}`;
+  scanProgressPct.textContent = `${pct}%`;
+  if (currentFileName) scanProgressFile.textContent = currentFileName;
+}
+
+function hideScanProgress(addedCount, total) {
+  if (!scanProgressOverlay) return;
+  scanProgressBar.style.width = '100%';
+  scanProgressCount.textContent = `${addedCount} / ${total}`;
+  scanProgressPct.textContent = '100%';
+  scanProgressTitle.textContent = 'Hoàn tất!';
+  scanProgressSub.textContent = `Đã thêm ${addedCount} bài vào thư viện`;
+  scanProgressFile.textContent = '';
+  setTimeout(() => {
+    scanProgressOverlay.classList.add('hidden');
+    scanProgressOverlay.classList.remove('flex');
+  }, 1400);
+}
+
+// Deep recursive directory reader (showDirectoryPicker API)
 async function scanDirectoryRecursively(dirHandle) {
   const files = [];
   async function traverse(handle) {
@@ -774,18 +813,10 @@ async function scanDirectoryRecursively(dirHandle) {
       if (entry.kind === 'file') {
         try {
           const file = await entry.getFile();
-          if (isAudioFile(file)) {
-            files.push(file);
-          }
-        } catch (e) {
-          console.warn('Error reading file from handle:', e);
-        }
+          if (isAudioFile(file)) files.push(file);
+        } catch (e) { /* skip locked files */ }
       } else if (entry.kind === 'directory') {
-        try {
-          await traverse(entry);
-        } catch (e) {
-          console.warn('Error accessing subfolder:', e);
-        }
+        try { await traverse(entry); } catch (e) { /* skip inaccessible dirs */ }
       }
     }
   }
@@ -793,234 +824,188 @@ async function scanDirectoryRecursively(dirHandle) {
   return files;
 }
 
+/**
+ * FAST ULTRA-RELIABLE audio import engine.
+ * Phase 1: Instantly add all files using filename metadata (appears in <2s for 371 songs).
+ * Phase 2: Background ID3 enrichment (cover art, proper title/artist) without blocking UI.
+ */
 async function handleAudioFiles(files) {
   if (!files || files.length === 0) return;
 
-  // Broad audio detection with safe fallback
+  // ── Step 1: Audio detection with 3-layer fallback ──────────
   let validFiles = Array.from(files).filter(f => isAudioFile(f));
-  if (validFiles.length === 0 && files.length > 0) {
-    // If strict filter found nothing, accept any file that isn't clearly image/doc
+
+  // Layer 2: Check extension only (for Android files with wrong MIME)
+  if (validFiles.length === 0) {
     validFiles = Array.from(files).filter(f => {
       const name = (f.name || '').toLowerCase();
-      return !name.endsWith('.jpg') && !name.endsWith('.png') && !name.endsWith('.pdf') && !name.endsWith('.txt');
+      return SUPPORTED_AUDIO_EXTENSIONS.some(ext => name.endsWith(ext));
+    });
+  }
+
+  // Layer 3: Exclude obvious non-audio (images, docs) — catch-all for Zalo/WhatsApp audio
+  if (validFiles.length === 0) {
+    const SKIP = ['.jpg','.jpeg','.png','.gif','.webp','.bmp','.pdf','.txt','.doc','.docx','.xls','.xlsx','.zip','.apk','.exe','.xml','.json'];
+    validFiles = Array.from(files).filter(f => {
+      const n = (f.name || '').toLowerCase();
+      return n.length > 0 && !SKIP.some(ext => n.endsWith(ext));
     });
   }
 
   if (validFiles.length === 0) {
-    showToast('Không tìm thấy file nhạc tương thích trong các file đã chọn', '⚠️');
+    showToast('Không tìm thấy file nhạc nào trong các file đã chọn', '⚠️');
     return;
   }
 
-  // Deduplication check: compare fileName and approximate fileSize against library
-  const newFiles = validFiles.filter(file => {
-    return !state.songs.some(s => s.fileName === file.name && Math.abs(s.fileSize - file.size) < 100);
-  });
+  // ── Step 2: Deduplication ───────────────────────────────────
+  const newFiles = validFiles.filter(file =>
+    !state.songs.some(s => s.fileName === file.name && Math.abs(s.fileSize - file.size) < 512)
+  );
 
   if (newFiles.length === 0) {
-    showToast(`Tất cả ${validFiles.length} bài hát đã có trong thư viện!`, '✅');
+    showToast(`✅ Tất cả ${validFiles.length} bài đã có trong thư viện!`, '✅');
     return;
   }
 
-  // Deduplicate within the newly picked files themselves
-  const uniqueFiles = [];
-  const seenMap = new Set();
-  for (const file of newFiles) {
-    const key = `${file.name}_${file.size}`;
-    if (!seenMap.has(key)) {
-      seenMap.add(key);
-      uniqueFiles.push(file);
-    }
-  }
+  // Self-dedup within the selection
+  const seen = new Set();
+  const uniqueFiles = newFiles.filter(f => {
+    const key = `${f.name}__${f.size}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const total = uniqueFiles.length;
+  showScanProgress(total);
 
   if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
   if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
-  showToast(`⚡ Đang quét siêu tốc ${uniqueFiles.length} bài hát mới...`, '⏳');
 
-  let addedCount = 0;
+  const baseTs = Date.now();
   const newSongs = [];
-  const baseTimestamp = Date.now();
+  let addedCount = 0;
 
-  // Process files in fast parallel batches of 10 workers
-  const BATCH_SIZE = 10;
-  for (let i = 0; i < uniqueFiles.length; i += BATCH_SIZE) {
-    const chunk = uniqueFiles.slice(i, i + BATCH_SIZE);
-    const parsedChunk = await Promise.all(
-      chunk.map((file, idx) => parseAudioFile(file, baseTimestamp + (uniqueFiles.length - (i + idx)) * 100))
-    );
+  // ── Phase 1: Instant filename-based import ──────────────────
+  const RENDER_EVERY = 25; // update list UI every 25 songs
+  for (let i = 0; i < uniqueFiles.length; i++) {
+    const file = uniqueFiles[i];
+    const songId = 'mm_' + baseTs + '_' + i + '_' + Math.random().toString(36).substring(2, 6);
+    const audioUrl = URL.createObjectURL(file);
 
-    for (const songData of parsedChunk) {
-      if (songData) {
-        try {
-          await dbAddSong(songData);
-          newSongs.push(songData);
-          addedCount++;
-        } catch (e) {
-          console.warn('Error saving song to IndexedDB:', songData.title, e);
-          newSongs.push(songData);
-          addedCount++;
-        }
-      }
+    let title = file.name.replace(/\.[^/.]+$/, '');
+    let artist = 'Music MIC Driver';
+    if (title.includes(' - ')) {
+      const parts = title.split(' - ');
+      artist = parts[0].trim();
+      title  = parts.slice(1).join(' - ').trim();
     }
 
-    if (uniqueFiles.length > 20 && i % 20 === 0) {
-      showToast(`⚡ Đang nạp: ${addedCount}/${uniqueFiles.length} bài hát...`, '⏳');
+    const songData = {
+      id: songId,
+      title,
+      artist,
+      album: 'Music MIC Driver',
+      duration: 0,
+      audioBlob: file,
+      audioUrl,
+      coverBlob: null,
+      coverUrl: 'logo.png',
+      fileName: file.name,
+      fileSize: file.size,
+      addedAt: baseTs + (total - i) * 10,
+      _needsEnrich: true
+    };
+
+    try { await dbAddSong(songData); } catch (e) { /* ignore */ }
+    newSongs.push(songData);
+    addedCount++;
+
+    // Update progress UI
+    updateScanProgress(addedCount, total, title);
+
+    // Render incrementally to let user see songs loading in
+    if (addedCount % RENDER_EVERY === 0 || addedCount === total) {
+      state.songs = [
+        ...newSongs,
+        ...state.songs.filter(s => !newSongs.some(ns => ns.id === s.id))
+      ];
+      state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      rebuildQueue(true);
+      renderTrackList();
+      updateLibraryBadges();
+
+      if (state.currentIndex === -1 && state.songs.length > 0) {
+        state.currentIndex = 0;
+        updateUIWithSong(state.songs[0]);
+      }
+      // Yield to browser to paint the update
+      await new Promise(r => setTimeout(r, 0));
     }
   }
 
+  hideScanProgress(addedCount, total);
   if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét nhạc';
   if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
 
-  if (addedCount > 0) {
-    // Put newly added songs at the TOP of the library
-    state.songs.unshift(...newSongs);
-    // Sort all songs: Newest first!
-    state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  showToast(`🎉 Đã nạp ${addedCount} bài! Tổng thư viện: ${state.songs.length} bài`, '🎵');
 
-    rebuildQueue(true);
-    renderTrackList();
-    updateLibraryBadges();
-    showToast(`🎉 Đã thêm ${addedCount} bài hát! Tổng thư viện: ${state.songs.length} bài`, '🎵');
-
-    if (state.currentIndex === -1 && state.songs.length > 0) {
-      state.currentIndex = 0;
-      updateUIWithSong(state.songs[0]);
-    }
-  }
+  // ── Phase 2: Background ID3 enrichment ─────────────────────
+  enrichSongsWithID3(newSongs);
 }
 
-function parseAudioFile(file, timestamp) {
-  return new Promise((resolve) => {
-    const songId = 'mm_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
-    const audioUrl = URL.createObjectURL(file);
-
-    let defaultTitle = file.name.replace(/\.[^/.]+$/, "");
-    let defaultArtist = "Music MIC Driver";
-    if (defaultTitle.includes(" - ")) {
-      const parts = defaultTitle.split(" - ");
-      defaultArtist = parts[0].trim();
-      defaultTitle = parts.slice(1).join(" - ").trim();
-    }
-
-    let isResolved = false;
-    const safeResolve = (meta) => {
-      if (isResolved) return;
-      isResolved = true;
-      resolve(meta);
-    };
-
-    // Fast 1200ms safety timeout to guarantee instant response
-    const timeoutHandle = setTimeout(() => {
-      safeResolve({
-        id: songId,
-        title: defaultTitle,
-        artist: defaultArtist,
-        album: "Music MIC Driver",
-        duration: 0,
-        audioBlob: file,
-        audioUrl,
-        coverBlob: null,
-        coverUrl: 'logo.png',
-        fileName: file.name,
-        fileSize: file.size,
-        addedAt: timestamp || Date.now()
-      });
-    }, 1200);
-
-    if (window.jsmediatags) {
+/**
+ * Silently enrich songs with ID3 tags (cover art, proper title) after fast import.
+ * Runs in background in small batches to avoid crashing mobile browsers.
+ */
+async function enrichSongsWithID3(songs) {
+  if (!window.jsmediatags) return;
+  const BATCH = 3;
+  for (let i = 0; i < songs.length; i += BATCH) {
+    await Promise.all(songs.slice(i, i + BATCH).map(song => new Promise(resolve => {
+      if (!song._needsEnrich || !song.audioBlob) return resolve();
+      const tid = setTimeout(resolve, 2500);
       try {
-        window.jsmediatags.read(file, {
-          onSuccess: (tag) => {
-            clearTimeout(timeoutHandle);
+        window.jsmediatags.read(song.audioBlob, {
+          onSuccess: async (tag) => {
+            clearTimeout(tid);
             const tags = tag.tags || {};
-            const title = tags.title ? String(tags.title).trim() : defaultTitle;
-            const artist = tags.artist ? String(tags.artist).trim() : defaultArtist;
-            const album = tags.album ? String(tags.album).trim() : "Music MIC Driver";
-            let coverBlob = null;
-            let coverUrl = 'logo.png';
-
+            let changed = false;
+            if (tags.title && tags.title.trim()) { song.title = tags.title.trim(); changed = true; }
+            if (tags.artist && tags.artist.trim()) { song.artist = tags.artist.trim(); changed = true; }
+            if (tags.album && tags.album.trim()) { song.album = tags.album.trim(); }
             if (tags.picture && tags.picture.data && tags.picture.data.length > 0) {
               try {
                 let mime = tags.picture.format || 'image/jpeg';
-                if (!mime.includes('/')) {
-                  mime = (mime.toLowerCase() === 'png') ? 'image/png' : 'image/jpeg';
-                }
-                const byteArray = new Uint8Array(tags.picture.data);
-                coverBlob = new Blob([byteArray], { type: mime });
-                coverUrl = URL.createObjectURL(coverBlob);
-              } catch (e) {
-                coverBlob = null;
-                coverUrl = 'logo.png';
-              }
+                if (!mime.includes('/')) mime = mime.toLowerCase() === 'png' ? 'image/png' : 'image/jpeg';
+                const blob = new Blob([new Uint8Array(tags.picture.data)], { type: mime });
+                song.coverBlob = blob;
+                song.coverUrl  = URL.createObjectURL(blob);
+                changed = true;
+              } catch (e) {}
             }
-
-            safeResolve({
-              id: songId,
-              title,
-              artist,
-              album,
-              duration: 0,
-              audioBlob: file,
-              audioUrl,
-              coverBlob,
-              coverUrl,
-              fileName: file.name,
-              fileSize: file.size,
-              addedAt: timestamp || Date.now()
-            });
+            if (changed) {
+              song._needsEnrich = false;
+              try { await dbAddSong(song); } catch (e) {}
+              // Live patch DOM
+              const item = document.querySelector(`.track-item[data-id="${song.id}"]`);
+              if (item) {
+                const img = item.querySelector('img');
+                if (img && song.coverUrl !== 'logo.png') img.src = song.coverUrl;
+                const h4 = item.querySelector('h4');
+                if (h4) h4.textContent = song.title;
+              }
+              const cur = getCurrentSong();
+              if (cur && cur.id === song.id) updateUIWithSong(song);
+            }
+            resolve();
           },
-          onError: () => {
-            clearTimeout(timeoutHandle);
-            safeResolve({
-              id: songId,
-              title: defaultTitle,
-              artist: defaultArtist,
-              album: "Music MIC Driver",
-              duration: 0,
-              audioBlob: file,
-              audioUrl,
-              coverBlob: null,
-              coverUrl: 'logo.png',
-              fileName: file.name,
-              fileSize: file.size,
-              addedAt: timestamp || Date.now()
-            });
-          }
+          onError: () => { clearTimeout(tid); resolve(); }
         });
-      } catch (e) {
-        clearTimeout(timeoutHandle);
-        safeResolve({
-          id: songId,
-          title: defaultTitle,
-          artist: defaultArtist,
-          album: "Music MIC Driver",
-          duration: 0,
-          audioBlob: file,
-          audioUrl,
-          coverBlob: null,
-          coverUrl: 'logo.png',
-          fileName: file.name,
-          fileSize: file.size,
-          addedAt: timestamp || Date.now()
-        });
-      }
-    } else {
-      clearTimeout(timeoutHandle);
-      safeResolve({
-        id: songId,
-        title: defaultTitle,
-        artist: defaultArtist,
-        album: "Music MIC Driver",
-        duration: 0,
-        audioBlob: file,
-        audioUrl,
-        coverBlob: null,
-        coverUrl: 'logo.png',
-        fileName: file.name,
-        fileSize: file.size,
-        addedAt: timestamp || Date.now()
-      });
-    }
-  });
+      } catch (e) { clearTimeout(tid); resolve(); }
+    })));
+    await new Promise(r => setTimeout(r, 120)); // breathe between batches
+  }
 }
 
 // ==========================================

@@ -241,3 +241,18 @@ html, body {
   opacity: 0;
   pointer-events: none;
 }
+
+/* Scan Progress Overlay animation */
+#scanProgressOverlay {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+#scanProgressBar {
+  min-width: 2%;
+  transition: width 0.25s ease-out;
+}

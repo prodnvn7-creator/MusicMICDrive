@@ -14,13 +14,13 @@
   <meta name="theme-color" content="#121c27">
   
   <!-- Icons -->
-  <link rel="icon" type="image/png" href="favicon.png?v=8">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=8">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=8">
+  <link rel="icon" type="image/png" href="favicon.png?v=10">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=10">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=10">
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=10">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -420,16 +420,49 @@
     <span id="toastMsg">Thông báo</span>
   </div>
 
+  <!-- Scan Progress Overlay -->
+  <div id="scanProgressOverlay" class="fixed inset-0 z-[200] bg-black/70 backdrop-blur-sm hidden items-center justify-center p-6">
+    <div class="bg-[#181822] border border-white/15 rounded-3xl w-full max-w-sm p-6 flex flex-col gap-4 shadow-2xl">
+      <!-- Header -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-2xl bg-emerald-500/20 flex items-center justify-center flex-shrink-0">
+          <svg id="scanProgressIcon" class="w-5 h-5 text-emerald-400 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+          </svg>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p id="scanProgressTitle" class="text-white font-bold text-sm">Đang quét nhạc...</p>
+          <p id="scanProgressSub" class="text-white/50 text-xs truncate">Đọc thư viện âm thanh</p>
+        </div>
+      </div>
+
+      <!-- Progress Bar -->
+      <div class="w-full bg-white/10 rounded-full h-2.5 overflow-hidden">
+        <div id="scanProgressBar" class="h-full bg-gradient-to-r from-cyan-500 via-emerald-500 to-teal-400 rounded-full transition-all duration-300 ease-out" style="width:0%"></div>
+      </div>
+
+      <!-- Stats -->
+      <div class="flex items-center justify-between text-xs">
+        <span id="scanProgressCount" class="text-emerald-400 font-bold text-sm">0 / 0</span>
+        <span id="scanProgressPct" class="text-white/40 font-mono">0%</span>
+      </div>
+
+      <!-- Current file name -->
+      <p id="scanProgressFile" class="text-white/40 text-[11px] truncate text-center">Đang xử lý...</p>
+    </div>
+  </div>
+
   <!-- Dual Audio Decks for Apple Music Seamless Playback -->
   <audio id="deckA" preload="auto" playsinline webkit-playsinline></audio>
   <audio id="deckB" preload="auto" playsinline webkit-playsinline></audio>
 
   <!-- Hidden Pickers: Comprehensive Audio Scanner, Folder Scanner, and Free File Picker -->
-  <input type="file" id="scanAudioInput" multiple accept="audio/*,video/*,application/ogg,application/octet-stream,.mp3,.wav,.wave,.flac,.m4a,.aac,.ogg,.oga,.opus,.wma,.alac,.aiff,.aif,.caf,.weba,.webm,.mp4,.m4b,.m4p,.m4r,.3gp,.amr,.awb,.mid,.midi,*/*" class="hidden">
+  <input type="file" id="scanAudioInput" multiple accept="audio/*,video/mp4,video/webm,application/ogg,*/*" class="hidden">
   <input type="file" id="scanFolderInput" webkitdirectory directory multiple class="hidden">
   <input type="file" id="freeFileInput" multiple accept="*/*" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
