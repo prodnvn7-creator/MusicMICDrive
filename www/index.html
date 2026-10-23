@@ -20,7 +20,7 @@
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css?v=19">
+  <link rel="stylesheet" href="style.css?v=20">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -212,48 +212,47 @@
       <div class="absolute inset-0 bg-gradient-to-b from-black/50 via-black/30 to-black/85"></div>
     </div>
 
-    <!-- Drag Handle & Top Controls — large swipe-down zone -->
-    <div id="fullPlayerHeader" class="fp-drag-zone px-6 flex flex-col items-center relative z-20">
-      <!-- Swipe Down Grab Bar -->
-      <div id="swipeHandle" class="w-12 h-1.5 bg-white/40 rounded-full mb-3" aria-hidden="true"></div>
+    <!-- Swipe surface: header + artwork (finger can leave header without dying) -->
+    <div id="fpDragSurface" class="fp-drag-zone flex flex-col flex-1 min-h-0 relative z-20">
+      <!-- Drag Handle & Top Controls -->
+      <div id="fullPlayerHeader" class="px-6 flex flex-col items-center">
+        <div id="swipeHandle" class="w-12 h-1.5 bg-white/40 rounded-full mb-3" aria-hidden="true"></div>
 
-      <div class="w-full flex items-center justify-between pointer-events-none">
-        <!-- Close / Minimize Button -->
-        <button id="closeFullPlayerBtn" class="pointer-events-auto w-10 h-10 rounded-full glass-pill flex items-center justify-center text-white/80 active:scale-90 transition-transform">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-          </svg>
-        </button>
+        <div class="w-full flex items-center justify-between pointer-events-none">
+          <button id="closeFullPlayerBtn" class="pointer-events-auto w-10 h-10 rounded-full glass-pill flex items-center justify-center text-white/80 active:scale-90 transition-transform">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </button>
 
-        <div class="text-center pointer-events-none select-none">
-          <span class="text-[11px] font-bold tracking-widest text-white/50 uppercase">ĐANG PHÁT TỪ THƯ VIỆN</span>
-          <div class="text-xs text-white/80 font-medium truncate max-w-[200px]" id="currentPlaylistTitle">Music MIC Driver</div>
+          <div class="text-center pointer-events-none select-none">
+            <span class="text-[11px] font-bold tracking-widest text-white/50 uppercase">ĐANG PHÁT TỪ THƯ VIỆN</span>
+            <div class="text-xs text-white/80 font-medium truncate max-w-[200px]" id="currentPlaylistTitle">Music MIC Driver</div>
+          </div>
+
+          <button id="openQueueBtn" class="pointer-events-auto w-10 h-10 rounded-full glass-pill flex items-center justify-center text-white/80 active:scale-90 transition-transform" title="Danh sách tiếp theo">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10"/>
+            </svg>
+          </button>
         </div>
-
-        <!-- Queue Drawer Button -->
-        <button id="openQueueBtn" class="pointer-events-auto w-10 h-10 rounded-full glass-pill flex items-center justify-center text-white/80 active:scale-90 transition-transform" title="Danh sách tiếp theo">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10"/>
-          </svg>
-        </button>
       </div>
-    </div>
 
-    <!-- Center: Large Artwork with iOS Scale & Shadow Animation -->
-    <div class="flex-1 flex items-center justify-center px-8 py-4 artwork-container">
-      <div id="artworkContainerBtn" class="relative w-full max-w-[340px] aspect-square flex items-center justify-center group cursor-pointer" title="Chạm để đổi ảnh bìa bài hát">
-        <img id="fullCover" src="logo.png" alt="Artwork" 
-          class="artwork-img artwork-paused w-full h-full object-cover rounded-3xl border border-white/10 shadow-2xl">
-        <!-- Change Cover Badge Button -->
-        <button type="button" id="changeCoverBadgeBtn" class="absolute bottom-3 right-3 glass-pill px-3 py-1.5 rounded-full text-xs text-white/90 bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 shadow-lg active:scale-90 transition-transform cursor-pointer">
-          <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
-          </svg>
-          <span class="font-medium">Đổi ảnh bìa</span>
-        </button>
+      <!-- Artwork (also part of swipe-down surface) -->
+      <div class="flex-1 flex items-center justify-center px-8 py-4 artwork-container min-h-0">
+        <div id="artworkContainerBtn" class="relative w-full max-w-[340px] aspect-square flex items-center justify-center group cursor-pointer" title="Chạm để đổi ảnh bìa bài hát">
+          <img id="fullCover" src="logo.png" alt="Artwork" 
+            class="artwork-img artwork-paused w-full h-full object-cover rounded-3xl border border-white/10 shadow-2xl pointer-events-none">
+          <button type="button" id="changeCoverBadgeBtn" class="absolute bottom-3 right-3 glass-pill px-3 py-1.5 rounded-full text-xs text-white/90 bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 shadow-lg active:scale-90 transition-transform cursor-pointer">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+            <span class="font-medium">Đổi ảnh bìa</span>
+          </button>
+        </div>
+        <input type="file" id="coverPickerInput" accept="image/*" class="hidden">
       </div>
-      <input type="file" id="coverPickerInput" accept="image/*" class="hidden">
     </div>
 
     <!-- Song Metadata, Scrubber & Playback Controls Area -->
@@ -438,6 +437,6 @@
   <input type="file" id="freeFileInput" multiple accept="*/*" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>

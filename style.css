@@ -299,10 +299,17 @@ html, body {
   pointer-events: none;
 }
 
+#fpDragSurface {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 #fullPlayerHeader {
-  min-height: 96px;
+  min-height: 88px;
   padding-top: 12px;
-  padding-bottom: 16px;
+  padding-bottom: 14px;
+  flex-shrink: 0;
 }
 
 #swipeHandle {
