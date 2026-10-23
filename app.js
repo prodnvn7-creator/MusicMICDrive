@@ -7,8 +7,9 @@
 // 1. STATE & CONSTANTS
 // ==========================================
 const DB_NAME = 'MusicMeltingDriveDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'songs';
+const SETTINGS_STORE = 'settings';
 
 const state = {
   db: null,
@@ -24,7 +25,8 @@ const state = {
   isCrossfading: false,
   fadeInterval: null,
   isDraggingSeek: false,
-  searchQuery: ''
+  searchQuery: '',
+  linkedFolderHandle: null
 };
 
 // Dual Audio Deck References
@@ -40,11 +42,20 @@ const emptyStateEl = document.getElementById('emptyState');
 const trackCountBadge = document.getElementById('trackCountBadge');
 const storageInfoBadge = document.getElementById('storageInfoBadge');
 const fileInput = document.getElementById('fileInput');
+const folderInput = document.getElementById('folderInput');
 const importBtn = document.getElementById('importBtn');
+const syncFolderBtn = document.getElementById('syncFolderBtn');
+const syncFolderIcon = document.getElementById('syncFolderIcon');
+const syncBtnText = document.getElementById('syncBtnText');
+const linkedFolderBanner = document.getElementById('linkedFolderBanner');
+const linkedFolderName = document.getElementById('linkedFolderName');
+const rescanFolderBtn = document.getElementById('rescanFolderBtn');
 const emptyStateImportBtn = document.getElementById('emptyStateImportBtn');
+const emptyStateFolderBtn = document.getElementById('emptyStateFolderBtn');
 const searchInput = document.getElementById('searchInput');
 const clearSearchBtn = document.getElementById('clearSearchBtn');
 const quickShuffleAllBtn = document.getElementById('quickShuffleAllBtn');
+const modalSyncFolderBtn = document.getElementById('modalSyncFolderBtn');
 
 // Mini Player Elements
 const miniPlayerDock = document.getElementById('miniPlayerDock');
@@ -117,6 +128,9 @@ function initDB() {
         store.createIndex('addedAt', 'addedAt', { unique: false });
         store.createIndex('title', 'title', { unique: false });
       }
+      if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
+        db.createObjectStore(SETTINGS_STORE);
+      }
     };
     request.onsuccess = (event) => {
       state.db = event.target.result;
@@ -126,6 +140,36 @@ function initDB() {
       console.error('IndexedDB error:', event.target.error);
       reject(event.target.error);
     };
+  });
+}
+
+function dbSaveSetting(key, val) {
+  return new Promise((resolve) => {
+    try {
+      if (!state.db) return resolve();
+      const tx = state.db.transaction([SETTINGS_STORE], 'readwrite');
+      const store = tx.objectStore(SETTINGS_STORE);
+      store.put(val, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch (e) {
+      resolve();
+    }
+  });
+}
+
+function dbGetSetting(key) {
+  return new Promise((resolve) => {
+    try {
+      if (!state.db) return resolve(null);
+      const tx = state.db.transaction([SETTINGS_STORE], 'readonly');
+      const store = tx.objectStore(SETTINGS_STORE);
+      const req = store.get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
   });
 }
 
@@ -587,6 +631,9 @@ document.addEventListener('visibilitychange', () => {
     // Screen is ON
     iosEngineBadge.innerHTML = '<span>⚡ Crossfade 3s (Màn hình mở)</span>';
     iosEngineBadge.className = 'flex items-center gap-1 font-mono text-[10px] text-white/50';
+
+    // Auto-rescan linked folder when returning to app (e.g. after downloading from Zalo)
+    autoScanLinkedFolder();
   }
 });
 
@@ -645,16 +692,40 @@ function syncMediaSessionPositionState() {
 }
 
 // ==========================================
-// 8. ID3 TAG EXTRACTION & FILE IMPORTING
+// 8. ID3 TAG EXTRACTION & FOLDER AUTO-SYNC
 // ==========================================
-async function handleAudioFiles(files) {
+const SUPPORTED_AUDIO_EXTENSIONS = ['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wma', '.alac'];
+
+function isAudioFile(filename) {
+  if (!filename) return false;
+  const lower = filename.toLowerCase();
+  return SUPPORTED_AUDIO_EXTENSIONS.some(ext => lower.endsWith(ext));
+}
+
+async function handleAudioFiles(files, isAutoScan = false) {
   if (!files || files.length === 0) return;
 
-  showToast(`Đang đọc ${files.length} file nhạc...`, '⏳');
+  const validFiles = Array.from(files).filter(f => isAudioFile(f.name));
+  if (validFiles.length === 0) {
+    if (!isAutoScan) showToast('Không tìm thấy file nhạc tương thích trong thư mục', '⚠️');
+    return;
+  }
+
+  // Deduplication check: compare fileName and approximate fileSize
+  const newFiles = validFiles.filter(file => {
+    return !state.songs.some(s => s.fileName === file.name && Math.abs(s.fileSize - file.size) < 100);
+  });
+
+  if (newFiles.length === 0) {
+    if (!isAutoScan) showToast('Thư viện đã đồng bộ, không có bài hát mới', '✅');
+    return;
+  }
+
+  showToast(isAutoScan ? `Tự động phát hiện ${newFiles.length} bài mới...` : `Đang nạp ${newFiles.length} bài hát mới...`, '⏳');
   let addedCount = 0;
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
+  for (let i = 0; i < newFiles.length; i++) {
+    const file = newFiles[i];
     try {
       const songData = await parseAudioFile(file);
       await dbAddSong(songData);
@@ -669,13 +740,109 @@ async function handleAudioFiles(files) {
     rebuildQueue(true);
     renderTrackList();
     updateLibraryBadges();
-    showToast(`Đã thêm ${addedCount} bài hát vào thư viện!`, '✅');
+    showToast(`🎉 Đã tự động cập nhật ${addedCount} bài hát mới từ Zalo/Thư mục!`, '🎵');
 
     // If nothing is playing, set first song as ready
     if (state.currentIndex === -1 && state.songs.length > 0) {
       state.currentIndex = 0;
       updateUIWithSong(state.songs[0]);
     }
+  }
+}
+
+// Recursively scan all audio files from a Directory Handle
+async function getFilesFromDirectoryHandle(dirHandle) {
+  const files = [];
+  try {
+    for await (const entry of dirHandle.values()) {
+      try {
+        if (entry.kind === 'file') {
+          if (isAudioFile(entry.name)) {
+            const file = await entry.getFile();
+            files.push(file);
+          }
+        } else if (entry.kind === 'directory') {
+          const subFiles = await getFilesFromDirectoryHandle(entry);
+          files.push(...subFiles);
+        }
+      } catch (e) {
+        console.warn('Error reading entry:', entry.name, e);
+      }
+    }
+  } catch (err) {
+    console.warn('Directory reading failed:', err);
+  }
+  return files;
+}
+
+// User-triggered Folder Picker (supports modern File System Access API & fallback)
+async function pickAndSyncFolder() {
+  if (syncFolderIcon) syncFolderIcon.classList.add('animate-spin');
+  if (syncBtnText) syncBtnText.textContent = 'Đang quét...';
+
+  if ('showDirectoryPicker' in window) {
+    try {
+      const dirHandle = await window.showDirectoryPicker({
+        id: 'mm_drive_music_folder',
+        mode: 'read'
+      });
+
+      state.linkedFolderHandle = dirHandle;
+      await dbSaveSetting('linked_folder_handle', dirHandle);
+      await dbSaveSetting('linked_folder_name', dirHandle.name);
+
+      updateLinkedFolderUI(dirHandle.name, false);
+
+      const files = await getFilesFromDirectoryHandle(dirHandle);
+      await handleAudioFiles(files, false);
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.warn('showDirectoryPicker error, fallback to folderInput:', err);
+        if (folderInput) folderInput.click();
+      }
+    } finally {
+      if (syncFolderIcon) syncFolderIcon.classList.remove('animate-spin');
+      if (syncBtnText) syncBtnText.textContent = 'Quét thư mục';
+    }
+  } else {
+    // Safari / iOS fallback using webkitdirectory folder picker
+    if (syncFolderIcon) syncFolderIcon.classList.remove('animate-spin');
+    if (syncBtnText) syncBtnText.textContent = 'Quét thư mục';
+    if (folderInput) folderInput.click();
+  }
+}
+
+// Auto-scan linked folder on app startup or return from background
+async function autoScanLinkedFolder() {
+  try {
+    const handle = state.linkedFolderHandle || await dbGetSetting('linked_folder_handle');
+    if (!handle) return;
+
+    state.linkedFolderHandle = handle;
+    const perm = await handle.queryPermission({ mode: 'read' });
+
+    if (perm === 'granted') {
+      updateLinkedFolderUI(handle.name, false);
+      const files = await getFilesFromDirectoryHandle(handle);
+      await handleAudioFiles(files, true);
+    } else {
+      updateLinkedFolderUI(handle.name, true);
+    }
+  } catch (err) {
+    console.warn('Auto-scan linked folder error:', err);
+  }
+}
+
+function updateLinkedFolderUI(folderName, needsPermission = false) {
+  if (!linkedFolderBanner || !linkedFolderName) return;
+
+  linkedFolderBanner.classList.remove('hidden');
+  linkedFolderBanner.classList.add('flex');
+
+  if (needsPermission) {
+    linkedFolderName.textContent = `📁 Thư mục: ${folderName} (Bấm "Đồng bộ ngay" để quét bài mới)`;
+  } else {
+    linkedFolderName.textContent = `📁 Đã liên kết: ${folderName} (Tự động cập nhật bài mới)`;
   }
 }
 
@@ -1069,7 +1236,29 @@ function escapeHtml(text) {
 // 11. EVENT HANDLERS & BINDINGS
 // ==========================================
 function setupEventHandlers() {
-  // File Import
+  // Folder Auto-Sync Pickers
+  if (syncFolderBtn) syncFolderBtn.addEventListener('click', () => pickAndSyncFolder());
+  if (rescanFolderBtn) rescanFolderBtn.addEventListener('click', () => pickAndSyncFolder());
+  if (emptyStateFolderBtn) emptyStateFolderBtn.addEventListener('click', () => pickAndSyncFolder());
+  if (modalSyncFolderBtn) {
+    modalSyncFolderBtn.addEventListener('click', () => {
+      optionsModal.classList.add('hidden');
+      optionsModal.classList.remove('flex');
+      pickAndSyncFolder();
+    });
+  }
+
+  // Folder Input Fallback (for Safari & folder selection)
+  if (folderInput) {
+    folderInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleAudioFiles(e.target.files, false);
+        folderInput.value = '';
+      }
+    });
+  }
+
+  // File Import (individual files)
   importBtn.addEventListener('click', () => fileInput.click());
   emptyStateImportBtn.addEventListener('click', () => fileInput.click());
   modalAddSongsBtn.addEventListener('click', () => {
@@ -1079,8 +1268,64 @@ function setupEventHandlers() {
   });
 
   fileInput.addEventListener('change', (e) => {
-    handleAudioFiles(e.target.files);
+    handleAudioFiles(e.target.files, false);
     fileInput.value = '';
+  });
+
+  // Drag and Drop (folders or files)
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const items = e.dataTransfer.items;
+    if (!items || items.length === 0) return;
+
+    const files = [];
+    const queue = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.webkitGetAsEntry) {
+        const entry = item.webkitGetAsEntry();
+        if (entry) queue.push(entry);
+      } else if (item.getAsFile) {
+        const f = item.getAsFile();
+        if (f && isAudioFile(f.name)) files.push(f);
+      }
+    }
+
+    async function traverseEntry(entry) {
+      if (entry.isFile) {
+        return new Promise(resolve => {
+          entry.file(f => {
+            if (isAudioFile(f.name)) files.push(f);
+            resolve();
+          }, () => resolve());
+        });
+      } else if (entry.isDirectory) {
+        const dirReader = entry.createReader();
+        return new Promise(resolve => {
+          dirReader.readEntries(async entries => {
+            for (const child of entries) {
+              await traverseEntry(child);
+            }
+            resolve();
+          }, () => resolve());
+        });
+      }
+    }
+
+    for (const entry of queue) {
+      await traverseEntry(entry);
+    }
+
+    if (files.length > 0) {
+      handleAudioFiles(files, false);
+    }
   });
 
   // Search
@@ -1281,6 +1526,9 @@ async function initApp() {
     renderTrackList();
     updateLibraryBadges();
     setupEventHandlers();
+
+    // Check & auto-scan linked music folder on startup
+    autoScanLinkedFolder();
 
     if (state.songs.length > 0) {
       state.currentIndex = 0;

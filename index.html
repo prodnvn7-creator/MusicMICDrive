@@ -60,12 +60,20 @@
 
         <!-- Header Actions -->
         <div class="flex items-center gap-2">
+          <!-- Auto-Sync Folder Button -->
+          <button id="syncFolderBtn" class="glass-pill px-3 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-400 shadow-md active:scale-95 transition-all" title="Quét & Tự động đồng bộ thư mục Zalo / Download">
+            <svg id="syncFolderIcon" class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            <span id="syncBtnText">Quét thư mục</span>
+          </button>
+
           <!-- Import Music Button -->
-          <button id="importBtn" class="glass-pill px-3.5 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-white shadow-md active:scale-95 transition-all">
-            <svg class="w-4 h-4 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <button id="importBtn" class="glass-pill px-3 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-white/90 shadow-md active:scale-95 transition-all" title="Chọn file nhạc lẻ">
+            <svg class="w-3.5 h-3.5 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
             </svg>
-            <span>Thêm nhạc</span>
+            <span>Thêm file</span>
           </button>
 
           <!-- More Options Menu Button -->
@@ -77,6 +85,17 @@
             </svg>
           </button>
         </div>
+      </div>
+
+      <!-- Linked Auto-Sync Folder Banner -->
+      <div id="linkedFolderBanner" class="hidden items-center justify-between text-[11px] bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-xl text-emerald-300">
+        <div class="flex items-center gap-1.5 truncate">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span id="linkedFolderName" class="truncate font-medium">Đã liên kết: Tự động cập nhật nhạc mới</span>
+        </div>
+        <button id="rescanFolderBtn" class="font-bold underline text-emerald-400 hover:text-emerald-200 ml-2 flex-shrink-0 cursor-pointer">
+          Đồng bộ ngay
+        </button>
       </div>
 
       <!-- Quick Search Bar -->
@@ -124,14 +143,22 @@
         </div>
         <h3 class="text-xl font-bold text-white mb-2">Thư viện trống</h3>
         <p class="text-sm text-white/60 max-w-sm mb-6 leading-relaxed">
-          Chọn file nhạc từ điện thoại hoặc máy tính (<span class="text-pink-400 font-mono">.mp3, .wav, .flac, .m4a</span>). Nhạc sẽ được lưu trực tiếp vào bộ nhớ máy (IndexedDB) và phát hoàn toàn <span class="text-emerald-400 font-semibold">Offline</span>.
+          Chỉ cần chọn thư mục chứa nhạc (<span class="text-emerald-400 font-medium">Download, Zalo, Music...</span>), ứng dụng sẽ <span class="text-white font-semibold">tự động quét toàn bộ bài hát</span> và <span class="text-pink-400 font-semibold">tự động cập nhật bài mới</span> mỗi khi bạn tải về.
         </p>
-        <button id="emptyStateImportBtn" class="px-6 py-3 rounded-2xl bg-gradient-to-r from-pink-500 to-rose-600 text-white font-semibold text-sm shadow-xl active:scale-95 transition-all flex items-center gap-2">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
-          </svg>
-          <span>Chọn file nhạc ngay</span>
-        </button>
+        <div class="flex flex-col sm:flex-row gap-3 w-full max-w-sm">
+          <button id="emptyStateFolderBtn" class="flex-1 px-5 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-semibold text-xs shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+            </svg>
+            <span>Quét cả Thư mục (Zalo/Tải về)</span>
+          </button>
+          <button id="emptyStateImportBtn" class="px-5 py-3.5 rounded-2xl glass-pill text-white/80 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-1.5">
+            <svg class="w-4 h-4 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
+            </svg>
+            <span>Chọn file lẻ</span>
+          </button>
+        </div>
       </div>
 
       <!-- Tracks Container -->
@@ -357,11 +384,17 @@
   <div id="optionsModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden items-end sm:items-center justify-center p-4">
     <div class="bg-[#181822] border border-white/10 rounded-2xl w-full max-w-sm p-4 flex flex-col gap-3 shadow-2xl">
       <h4 class="font-bold text-white text-base">Tùy chọn Thư viện</h4>
+      <button id="modalSyncFolderBtn" class="flex items-center gap-3 p-3 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-sm font-medium text-emerald-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+        </svg>
+        <span>Chọn Thư mục đồng bộ (Zalo/Tải về)</span>
+      </button>
       <button id="modalAddSongsBtn" class="flex items-center gap-3 p-3 rounded-xl bg-white/5 hover:bg-white/10 text-sm font-medium text-white">
         <svg class="w-5 h-5 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
         </svg>
-        <span>Thêm bài hát mới</span>
+        <span>Thêm file nhạc lẻ</span>
       </button>
       <button id="modalClearAllBtn" class="flex items-center gap-3 p-3 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-sm font-medium text-red-400">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -385,8 +418,9 @@
   <audio id="deckA" preload="auto" playsinline webkit-playsinline></audio>
   <audio id="deckB" preload="auto" playsinline webkit-playsinline></audio>
 
-  <!-- Hidden Multi-file picker -->
+  <!-- Hidden Multi-file and Folder pickers -->
   <input type="file" id="fileInput" multiple accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg" class="hidden">
+  <input type="file" id="folderInput" webkitdirectory directory multiple accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg" class="hidden">
 
   <!-- Core App Logic -->
   <script src="app.js"></script>
