@@ -10,6 +10,8 @@ const DB_NAME = 'MusicMeltingDriveDB';
 const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
+/** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
+const APP_BUILD = 26;
 
 const state = {
   db: null,
@@ -2773,6 +2775,92 @@ async function seedDemoLibrary({ force = false } = {}) {
 // ==========================================
 // 13. INITIALIZATION
 // ==========================================
+/** Keep Chrome "Cài đặt ứng dụng" / home-screen icon on the latest build automatically */
+function setupPwaAutoUpdate() {
+  if (!('serviceWorker' in navigator)) return;
+
+  let refreshing = false;
+  const reloadOnce = () => {
+    if (refreshing) return;
+    refreshing = true;
+    window.location.reload();
+  };
+
+  const wipeCachesAndReload = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (e) {}
+    window.location.reload();
+  };
+
+  /** Compare local bundle vs version.json on server (works even if SW is sticky) */
+  const checkBuildStamp = async () => {
+    try {
+      const res = await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const remote = Number(data && data.build);
+      if (!remote) return;
+      if (remote !== APP_BUILD) {
+        console.log(`[update] remote build ${remote} ≠ local ${APP_BUILD} → refresh`);
+        await wipeCachesAndReload();
+      }
+    } catch (e) {
+      // offline — keep current shell
+    }
+  };
+
+  const activateWaiting = (reg) => {
+    if (reg && reg.waiting) {
+      reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+    }
+  };
+
+  const checkSwUpdate = () => {
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      if (!reg) return;
+      reg.update().catch(() => {});
+      activateWaiting(reg);
+    });
+    checkBuildStamp();
+  };
+
+  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('./sw.js')
+      .then((reg) => {
+        console.log('Service Worker Registered! Scope:', reg.scope, 'build', APP_BUILD);
+        reg.update().catch(() => {});
+        activateWaiting(reg);
+        reg.addEventListener('updatefound', () => {
+          const neu = reg.installing;
+          if (!neu) return;
+          neu.addEventListener('statechange', () => {
+            if (neu.state === 'installed') activateWaiting(reg);
+          });
+        });
+      })
+      .catch((err) => console.warn('Service Worker registration failed:', err));
+
+    checkBuildStamp();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkSwUpdate();
+  });
+  window.addEventListener('focus', checkSwUpdate);
+  window.addEventListener('pageshow', checkSwUpdate);
+  // Catch updates while the installed app stays open
+  setInterval(checkSwUpdate, 45000);
+}
+
 async function initApp() {
   try {
     await initDB();
@@ -2853,52 +2941,8 @@ async function initApp() {
       }
     }
 
-    // Register Service Worker — force update for installed PWA / home-screen shortcut
-    if ('serviceWorker' in navigator) {
-      let refreshing = false;
-      const reloadOnce = () => {
-        if (refreshing) return;
-        refreshing = true;
-        window.location.reload();
-      };
-
-      navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
-
-      const checkSwUpdate = () => {
-        navigator.serviceWorker.getRegistration().then((reg) => {
-          if (reg) reg.update().catch(() => {});
-        });
-      };
-
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-          .then((reg) => {
-            console.log('Service Worker Registered! Scope:', reg.scope);
-            reg.update().catch(() => {});
-            // If a waiting worker already exists (common on home-screen apps), activate it
-            if (reg.waiting) {
-              reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-            }
-            reg.addEventListener('updatefound', () => {
-              const neu = reg.installing;
-              if (!neu) return;
-              neu.addEventListener('statechange', () => {
-                if (neu.state === 'installed' && navigator.serviceWorker.controller) {
-                  reloadOnce();
-                }
-              });
-            });
-          })
-          .catch((err) => console.warn('Service Worker registration failed:', err));
-      });
-
-      // Standalone shortcut often stays open — recheck when user returns
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') checkSwUpdate();
-      });
-      window.addEventListener('focus', checkSwUpdate);
-      window.addEventListener('pageshow', checkSwUpdate);
-    }
+    // Auto-update installed PWA ("Cài đặt ứng dụng") — no reinstall needed
+    setupPwaAutoUpdate();
 
   } catch (err) {
     console.error('App init failed:', err);

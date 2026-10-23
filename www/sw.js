@@ -1,4 +1,5 @@
-const CACHE_NAME = 'mm-drive-cache-v25';
+const CACHE_NAME = 'mm-drive-cache-v26';
+const APP_BUILD = 26;
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -17,9 +18,7 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
   );
 });
 
@@ -31,15 +30,9 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+    ).then(() => self.clients.claim())
   );
 });
 
@@ -63,7 +56,19 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // App shell: network-first so installed PWA / home-screen shortcut gets updates
+  // Always hit network for version stamp (installed app auto-update)
+  if (url.pathname.endsWith('version.json')) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' }).catch(() =>
+        new Response(JSON.stringify({ build: APP_BUILD }), {
+          headers: { 'Content-Type': 'application/json' }
+        })
+      )
+    );
+    return;
+  }
+
+  // App shell: network-first so Cài đặt / lối tắt nhận bản mới
   if (isAppShell(url, event.request)) {
     event.respondWith(
       fetch(event.request)
@@ -74,16 +79,13 @@ self.addEventListener('fetch', (event) => {
           }
           return networkResponse;
         })
-        .catch(() => {
-          return caches.match(event.request).then((cached) => {
-            return cached || caches.match('./index.html');
-          });
-        })
+        .catch(() =>
+          caches.match(event.request).then((cached) => cached || caches.match('./index.html'))
+        )
     );
     return;
   }
 
-  // Other assets: stale-while-revalidate
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       const fetchPromise = fetch(event.request)

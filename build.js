@@ -11,6 +11,7 @@ const filesToCopy = [
   'app.js',
   'style.css',
   'sw.js',
+  'version.json',
   'manifest.json',
   'tailwind.js',
   'jsmediatags.min.js',
