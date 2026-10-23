@@ -899,10 +899,14 @@ function parseAudioFile(file) {
             let coverBlob = null;
             let coverUrl = 'logo.png';
 
-            if (tags.picture) {
+            if (tags.picture && tags.picture.data && tags.picture.data.length > 0) {
               try {
+                let mime = tags.picture.format || 'image/jpeg';
+                if (!mime.includes('/')) {
+                  mime = (mime.toLowerCase() === 'png') ? 'image/png' : 'image/jpeg';
+                }
                 const byteArray = new Uint8Array(tags.picture.data);
-                coverBlob = new Blob([byteArray], { type: tags.picture.format || 'image/jpeg' });
+                coverBlob = new Blob([byteArray], { type: mime });
                 coverUrl = URL.createObjectURL(coverBlob);
               } catch (e) {
                 console.warn('Cover blob conversion failed, fallback to logo:', e);
@@ -1438,6 +1442,38 @@ function setupEventHandlers() {
     state.masterVolume = parseFloat(e.target.value);
     activeDeck.volume = state.masterVolume;
   });
+
+  // Change artwork on tap
+  const artworkContainerBtn = document.getElementById('artworkContainerBtn');
+  const coverPickerInput = document.getElementById('coverPickerInput');
+  if (artworkContainerBtn && coverPickerInput) {
+    artworkContainerBtn.addEventListener('click', () => {
+      const currentSong = getCurrentSong();
+      if (!currentSong) return;
+      coverPickerInput.click();
+    });
+
+    coverPickerInput.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      const currentSong = getCurrentSong();
+      if (!currentSong) return;
+
+      currentSong.coverBlob = file;
+      currentSong.coverUrl = URL.createObjectURL(file);
+
+      // Save permanently to IndexedDB
+      await dbAddSong(currentSong);
+
+      // Refresh UI & Player & Lockscreen
+      updateUIWithSong(currentSong);
+      updateMediaSession(currentSong);
+      renderTrackList();
+      showToast('Đã đổi ảnh bìa cho bài hát!', '🖼️');
+      coverPickerInput.value = '';
+    });
+  }
 
   // Favorite button
   favoriteBtn.addEventListener('click', () => {
