@@ -1783,20 +1783,26 @@ function fpResetDragVisual() {
   fpClearInlineSheet();
 }
 
-/** 1:1 finger follow — only softens near bottom edge (never “blocks” mid-screen) */
+/** 1:1 finger follow + ghost fade (opacity) as sheet pulls down */
 function fpApplyPull(rawPull) {
   const h = window.innerHeight || 700;
   let y = Math.max(0, rawPull);
   const edge = h * 0.88;
   if (y > edge) y = edge + (y - edge) * 0.45;
-  const progress = Math.min(1, y / (h * 0.55));
-  const scale = 1 - progress * 0.04;
-  const radius = progress * 28;
+
+  // 0 → 1 as user pulls ~half screen
+  const progress = Math.min(1, y / (h * 0.48));
+  const scale = 1 - progress * 0.06;
+  const radius = progress * 34;
+  // Ghost: sheet becomes translucent so library shows through
+  const ghostOpacity = Math.max(0.36, 1 - progress * 0.58);
 
   fullPlayer.style.transform = `translate3d(0, ${y}px, 0) scale(${scale})`;
   fullPlayer.style.borderRadius = `${radius}px ${radius}px 0 0`;
+  fullPlayer.style.opacity = String(ghostOpacity);
+  fullPlayer.style.setProperty('--fp-ghost', String(progress));
   if (fullPlayerBackdropBlur) {
-    fullPlayerBackdropBlur.style.opacity = String(0.5 * (1 - progress * 0.4));
+    fullPlayerBackdropBlur.style.opacity = String(0.52 * (1 - progress * 0.85));
   }
   fpDrag.pull = y;
 }

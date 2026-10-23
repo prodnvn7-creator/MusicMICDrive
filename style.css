@@ -270,18 +270,23 @@ html, body {
 
 /* During drag: no CSS transition fighting the finger */
 #fullPlayer.fp-dragging {
+  --fp-ghost: 0;
   transition: none !important;
-  will-change: transform;
+  will-change: transform, opacity;
+  /* Soft sheet edge while ghosting over the library */
+  box-shadow: 0 -12px 48px rgba(0, 0, 0, calc(0.45 * (1 - var(--fp-ghost, 0))));
 }
 
-/* Soften expensive blur while dragging → less stutter */
+/* Soften expensive blur while dragging → less stutter + clearer ghost */
 #fullPlayer.fp-dragging #fullPlayerBackdropBlur {
   transition: none !important;
-  filter: blur(18px) !important;
+  filter: blur(14px) !important;
 }
 
 #fullPlayer.fp-dragging .artwork-img {
   transition: none !important;
+  /* Artwork softens with the ghost pull */
+  opacity: calc(1 - (var(--fp-ghost, 0) * 0.25));
 }
 
 /* Spring snap-back */
