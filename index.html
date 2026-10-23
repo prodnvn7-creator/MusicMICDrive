@@ -138,14 +138,20 @@
             </svg>
             <span>QUÉT TOÀN BỘ ÂM THANH TRONG MÁY</span>
           </button>
+          <button id="emptyStateScanFolderBtn" class="w-full py-3 px-5 rounded-2xl glass-pill text-purple-300 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-2 border border-purple-500/30 bg-purple-500/10 hover:bg-purple-500/20">
+            <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+            </svg>
+            <span>QUÉT CẢ THƯ MỤC (ĐỆ QUY TÌM HẾT 371+ BÀI)</span>
+          </button>
           <button id="emptyStatePickFileBtn" class="w-full py-3 px-5 rounded-2xl glass-pill text-white/90 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-2 border border-white/10 hover:bg-white/10">
             <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
             </svg>
             <span>CHỌN FILE TỪ THƯ MỤC BẤT KỲ</span>
           </button>
-          <p class="text-[11px] text-white/50 text-center">
-            Mẹo: Khi quét âm thanh, bấm <b>"Chọn tất cả"</b>. Bài mới sẽ tự động hiển thị ở đầu danh sách.
+          <p class="text-[11px] text-white/60 text-center leading-relaxed">
+            💡 <b>Mẹo chọn đủ 371 bài:</b> Khi mở bảng chọn, bấm menu <b>3 gạch ở góc trái</b> ➔ Chọn <b>Bộ nhớ trong</b> (hoặc thư mục <b>Download / Zalo / Music</b>) ➔ Bấm <b>Chọn tất cả</b>.
           </p>
         </div>
       </div>
@@ -375,11 +381,17 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
         </svg>
-        <span>Quét toàn bộ âm thanh trong máy</span>
+        <span>Quét toàn bộ âm thanh (MP3, WAV, FLAC, Zalo...)</span>
+      </button>
+      <button id="modalScanFolderBtn" class="flex items-center gap-3 p-3 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-sm font-medium text-purple-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+        </svg>
+        <span>Quét trọn vẹn cả thư mục (Đệ quy tìm hết 371+ bài)</span>
       </button>
       <button id="modalPickFileBtn" class="flex items-center gap-3 p-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-sm font-medium text-cyan-400">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
         </svg>
         <span>Chọn file từ thư mục bất kỳ</span>
       </button>
@@ -412,11 +424,12 @@
   <audio id="deckA" preload="auto" playsinline webkit-playsinline></audio>
   <audio id="deckB" preload="auto" playsinline webkit-playsinline></audio>
 
-  <!-- Hidden Pickers: Fast Audio Scanner and Free Folder Picker -->
-  <input type="file" id="scanAudioInput" multiple accept="audio/*" class="hidden">
-  <input type="file" id="freeFileInput" multiple accept="*/*,audio/*,.mp3,.flac,.m4a,.wav,.aac,.ogg,.opus,.wma" class="hidden">
+  <!-- Hidden Pickers: Comprehensive Audio Scanner, Folder Scanner, and Free File Picker -->
+  <input type="file" id="scanAudioInput" multiple accept="audio/*,video/*,application/ogg,application/octet-stream,.mp3,.wav,.wave,.flac,.m4a,.aac,.ogg,.oga,.opus,.wma,.alac,.aiff,.aif,.caf,.weba,.webm,.mp4,.m4b,.m4p,.m4r,.3gp,.amr,.awb,.mid,.midi,*/*" class="hidden">
+  <input type="file" id="scanFolderInput" webkitdirectory directory multiple class="hidden">
+  <input type="file" id="freeFileInput" multiple accept="*/*" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>
