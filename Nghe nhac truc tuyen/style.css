@@ -1,0 +1,299 @@
+/* Music Melting Drive - Apple Music Style Stylesheet */
+
+:root {
+  --c1: #fa233b;
+  --c2: #8b5cf6;
+  --c3: #3b82f6;
+  --c4: #101018;
+  --glow-rgb: 250, 35, 59;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #08080c;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  letter-spacing: -0.015em;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Dynamic Animated Mesh Gradient */
+.mesh-bg-container {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background-color: var(--c4);
+  transition: background-color 1.5s ease;
+}
+
+.mesh-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.65;
+  mix-blend-mode: screen;
+  will-change: transform, background-color;
+  transition: background-color 1.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mesh-blob-1 {
+  top: -15%;
+  left: -10%;
+  width: 75vw;
+  height: 75vw;
+  max-width: 550px;
+  max-height: 550px;
+  background: var(--c1);
+  animation: meshDrift1 18s ease-in-out infinite alternate;
+}
+
+.mesh-blob-2 {
+  bottom: -10%;
+  right: -10%;
+  width: 80vw;
+  height: 80vw;
+  max-width: 600px;
+  max-height: 600px;
+  background: var(--c2);
+  animation: meshDrift2 22s ease-in-out infinite alternate;
+}
+
+.mesh-blob-3 {
+  top: 35%;
+  right: 15%;
+  width: 60vw;
+  height: 60vw;
+  max-width: 450px;
+  max-height: 450px;
+  background: var(--c3);
+  animation: meshDrift3 20s ease-in-out infinite alternate;
+}
+
+.mesh-overlay {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, rgba(10, 10, 15, 0.45) 0%, rgba(8, 8, 12, 0.88) 100%);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+}
+
+@keyframes meshDrift1 {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(15%, 25%) scale(1.15); }
+  100% { transform: translate(-10%, 15%) scale(0.9); }
+}
+
+@keyframes meshDrift2 {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-20%, -15%) scale(1.1); }
+  100% { transform: translate(10%, -25%) scale(0.95); }
+}
+
+@keyframes meshDrift3 {
+  0% { transform: translate(0, 0) scale(0.9); }
+  50% { transform: translate(-15%, 15%) scale(1.2); }
+  100% { transform: translate(20%, -10%) scale(1); }
+}
+
+/* Glassmorphism Classes */
+.glass-panel {
+  background: rgba(28, 28, 34, 0.65);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-pill {
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.glass-pill:active {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Artwork Animations (Apple Music iOS Spec) */
+.artwork-container {
+  perspective: 1000px;
+}
+
+.artwork-img {
+  transition: transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.45s ease;
+  will-change: transform, box-shadow;
+}
+
+.artwork-playing {
+  transform: scale(1.0);
+  box-shadow: 0 24px 60px -10px rgba(var(--glow-rgb), 0.55), 0 12px 30px rgba(0, 0, 0, 0.7);
+}
+
+.artwork-paused {
+  transform: scale(0.88);
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.55);
+}
+
+/* Custom Seekbar (Scrubber) */
+.range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  outline: none;
+  cursor: pointer;
+  position: relative;
+  transition: height 0.15s ease;
+}
+
+.range-slider:active, .range-slider:hover {
+  height: 8px;
+}
+
+.range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.range-slider:active::-webkit-slider-thumb {
+  transform: scale(1.3);
+}
+
+.range-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+/* Volume Slider */
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  outline: none;
+  cursor: pointer;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* Track item hover & active states */
+.track-item {
+  transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+.track-item:active {
+  background-color: rgba(255, 255, 255, 0.1);
+  transform: scale(0.985);
+}
+
+/* Hide native scrollbars but keep scrolling smooth */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Safe areas */
+.safe-pt {
+  padding-top: max(16px, env(safe-area-inset-top));
+}
+
+.safe-pb {
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+
+/* Animated Sound Wave in active playing track */
+.sound-wave-bar {
+  display: inline-block;
+  width: 3px;
+  background-color: #fa233b;
+  border-radius: 2px;
+  animation: waveMotion 1s ease-in-out infinite alternate;
+}
+
+.sound-wave-bar:nth-child(1) { height: 12px; animation-delay: 0.1s; }
+.sound-wave-bar:nth-child(2) { height: 18px; animation-delay: 0.3s; }
+.sound-wave-bar:nth-child(3) { height: 8px;  animation-delay: 0.2s; }
+.sound-wave-bar:nth-child(4) { height: 15px; animation-delay: 0.4s; }
+
+@keyframes waveMotion {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}
+
+/* Full Screen Player Transition */
+#fullPlayer {
+  transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
+  will-change: transform, opacity;
+}
+
+#fullPlayer.hidden-player {
+  transform: translateY(105%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+#fullPlayer.visible-player {
+  transform: translateY(0%);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Toast Notification */
+#toast {
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease;
+}
+
+#toast.show {
+  transform: translate(-50%, 0);
+  opacity: 1;
+}
+
+#toast.hide {
+  transform: translate(-50%, 20px);
+  opacity: 0;
+  pointer-events: none;
+}
