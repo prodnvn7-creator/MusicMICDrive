@@ -25,8 +25,45 @@ const state = {
   fadeInterval: null,
   isDraggingSeek: false,
   searchQuery: '',
-  nextPreloadedId: null
+  nextPreloadedId: null,
+  nativeScanBusy: false
 };
+
+const nativeRefreshGate = {
+  lastAt: 0,
+  minIntervalMs: 20000 // don't hammer MediaStore on rapid app switches
+};
+
+function isNativeApk() {
+  return !!(
+    window.Capacitor &&
+    typeof window.Capacitor.isNativePlatform === 'function' &&
+    window.Capacitor.isNativePlatform() &&
+    window.Capacitor.Plugins &&
+    window.Capacitor.Plugins.MediaStoreScanner
+  );
+}
+
+function buildKnownSongKeySet(songs) {
+  const known = new Set();
+  for (let i = 0; i < songs.length; i++) {
+    const s = songs[i];
+    if (s.id) known.add('id:' + s.id);
+    if (s.nativePath) known.add('path:' + s.nativePath);
+    if (s.nativeUri) known.add('uri:' + s.nativeUri);
+    known.add('file:' + (s.fileName || '') + '|' + (s.fileSize || 0));
+  }
+  return known;
+}
+
+function nativeItemKeys(item) {
+  const keys = [];
+  if (item.id) keys.push('id:' + item.id);
+  if (item.path) keys.push('path:' + item.path);
+  if (item.contentUri) keys.push('uri:' + item.contentUri);
+  keys.push('file:' + (item.fileName || '') + '|' + (item.size || 0));
+  return keys;
+}
 
 // Dual Audio Deck References
 let deckA = document.getElementById('deckA');
@@ -769,9 +806,11 @@ function setupDeckEvents(deck) {
 setupDeckEvents(deckA);
 setupDeckEvents(deckB);
 
-// Page Visibility API — keep dual-deck safe when backgrounded (no missing DOM badge)
+// Page Visibility — when APK returns to foreground, light-scan for newly downloaded tracks
 document.addEventListener('visibilitychange', () => {
-  // Intentionally silent: blend vs direct is chosen at transition time via document.hidden
+  if (!document.hidden && isNativeApk()) {
+    refreshNativeLibrarySilent();
+  }
 });
 
 // ==========================================
@@ -1818,20 +1857,23 @@ function escapeHtml(text) {
 
 // Native Android MediaStore — full-device audio index
 async function scanAllAudioNative() {
-  if (!window.Capacitor || !window.Capacitor.Plugins || !window.Capacitor.Plugins.MediaStoreScanner) {
+  if (!isNativeApk()) {
     beginPhoneScanProgress('Chọn thư mục Bộ nhớ trong để quét cả máy…');
     if (scanFolderInput) scanFolderInput.click();
     return;
   }
 
+  if (state.nativeScanBusy) return;
+  state.nativeScanBusy = true;
   beginPhoneScanProgress('Đang quét toàn bộ MediaStore trên máy…');
 
   try {
     const res = await window.Capacitor.Plugins.MediaStoreScanner.scanAllAudio();
+    nativeRefreshGate.lastAt = Date.now();
     if (res && res.songs && res.songs.length > 0) {
       updateScanDiscoverCount(res.songs.length);
       await yieldToUI();
-      await handleNativeSongs(res.songs);
+      await handleNativeSongs(res.songs, { silent: false });
     } else {
       abortScanProgress();
       showToast('Không tìm thấy bài hát nào trên thiết bị', '⚠️');
@@ -1842,81 +1884,163 @@ async function scanAllAudioNative() {
     showToast('Chưa cấp quyền bộ nhớ: ' + (err.message || err), '⚠️');
     beginPhoneScanProgress('Chọn thư mục Bộ nhớ trong để quét cả máy…');
     if (scanFolderInput) scanFolderInput.click();
+  } finally {
+    state.nativeScanBusy = false;
   }
 }
 
-async function handleNativeSongs(nativeList) {
-  const total = nativeList.length;
-  showScanProgress(total, 'Đang nạp nhạc vào thư viện');
+/**
+ * Lightweight APK refresh: query MediaStore, add ONLY missing tracks, pin them on top.
+ * No overlay unless caller uses full scan. Throttled for efficiency.
+ */
+async function refreshNativeLibrarySilent() {
+  if (!isNativeApk()) return 0;
+  if (state.nativeScanBusy) return 0;
 
-  let addedCount = 0;
+  const now = Date.now();
+  if (now - nativeRefreshGate.lastAt < nativeRefreshGate.minIntervalMs) return 0;
+
+  state.nativeScanBusy = true;
+  nativeRefreshGate.lastAt = now;
+
+  try {
+    const res = await window.Capacitor.Plugins.MediaStoreScanner.scanAllAudio();
+    if (!res || !res.songs || res.songs.length === 0) return 0;
+
+    const added = await handleNativeSongs(res.songs, { silent: true });
+    if (added > 0) {
+      showToast(`+${added} bài mới vừa có trên máy`, '🎵');
+    }
+    return added;
+  } catch (err) {
+    console.warn('Silent MediaStore refresh:', err);
+    return 0;
+  } finally {
+    state.nativeScanBusy = false;
+  }
+}
+
+function setupNativeAutoRefresh() {
+  if (!isNativeApk()) return;
+
+  // Resume when returning from Zalo / Drive / home screen
+  window.addEventListener('focus', () => {
+    refreshNativeLibrarySilent();
+  });
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) refreshNativeLibrarySilent();
+  });
+
+  // Capacitor App plugin (optional — safe if not installed)
+  try {
+    const AppPlugin = window.Capacitor.Plugins.App;
+    if (AppPlugin && typeof AppPlugin.addListener === 'function') {
+      AppPlugin.addListener('appStateChange', (stateInfo) => {
+        if (stateInfo && stateInfo.isActive) refreshNativeLibrarySilent();
+      });
+    }
+  } catch (e) {}
+}
+
+/**
+ * @param {Array} nativeList
+ * @param {{ silent?: boolean }} options  silent = background refresh (no progress UI)
+ * @returns {Promise<number>} number of newly added songs
+ */
+async function handleNativeSongs(nativeList, options = {}) {
+  const silent = !!options.silent;
+  const total = nativeList.length;
+  if (!total) {
+    if (!silent) abortScanProgress();
+    return 0;
+  }
+
+  if (!silent) showScanProgress(total, 'Đang nạp nhạc vào thư viện');
+
+  const known = buildKnownSongKeySet(state.songs);
   const newSongs = [];
   const baseTs = Date.now();
 
   for (let i = 0; i < nativeList.length; i++) {
     const item = nativeList[i];
-    const exists = state.songs.some(s => s.fileName === item.fileName && Math.abs((s.fileSize || 0) - (item.size || 0)) < 512);
-    if (!exists) {
-      let audioUrl = item.contentUri;
-      if (window.Capacitor && window.Capacitor.convertFileSrc && item.path) {
-        audioUrl = window.Capacitor.convertFileSrc(item.path);
-      }
+    const keys = nativeItemKeys(item);
+    let exists = false;
+    for (let k = 0; k < keys.length; k++) {
+      if (known.has(keys[k])) { exists = true; break; }
+    }
+    if (exists) continue;
 
-      // Plugin already returns seconds
-      let duration = (typeof item.duration === 'number' && item.duration > 0)
-        ? Math.round(item.duration)
-        : 0;
-      if (duration <= 0 && item.size > 0) {
-        duration = Math.max(15, Math.round((item.size * 8) / (160 * 1000)));
-      }
+    for (let k = 0; k < keys.length; k++) known.add(keys[k]);
 
-      newSongs.push({
-        id: item.id || ('mm_nat_' + baseTs + '_' + i),
-        title: item.title,
-        artist: item.artist,
-        album: item.album,
-        duration: duration,
-        audioBlob: null,
-        audioUrl: audioUrl,
-        nativePath: item.path,
-        nativeUri: item.contentUri,
-        coverBlob: null,
-        coverUrl: item.albumArtUri || 'logo.png',
-        fileName: item.fileName,
-        fileSize: item.size,
-        addedAt: item.addedAt || (baseTs + (total - i) * 10),
-        isNative: true,
-        _durationVerified: duration > 0
-      });
-      addedCount++;
+    let audioUrl = item.contentUri;
+    if (window.Capacitor && window.Capacitor.convertFileSrc && item.path) {
+      audioUrl = window.Capacitor.convertFileSrc(item.path);
     }
 
-    if (i % 40 === 0 || i === total - 1) {
+    let duration = (typeof item.duration === 'number' && item.duration > 0)
+      ? Math.round(item.duration)
+      : 0;
+    if (duration <= 0 && item.size > 0) {
+      duration = Math.max(15, Math.round((item.size * 8) / (160 * 1000)));
+    }
+
+    // Stamp discover-time so brand-new downloads always float to the top
+    const addedAt = baseTs + (nativeList.length - i);
+
+    newSongs.push({
+      id: item.id || ('mm_nat_' + baseTs + '_' + i),
+      title: item.title,
+      artist: item.artist,
+      album: item.album,
+      duration: duration,
+      audioBlob: null,
+      audioUrl: audioUrl,
+      nativePath: item.path,
+      nativeUri: item.contentUri,
+      coverBlob: null,
+      coverUrl: item.albumArtUri || 'logo.png',
+      fileName: item.fileName,
+      fileSize: item.size,
+      addedAt,
+      isNative: true,
+      _durationVerified: duration > 0
+    });
+
+    if (!silent && (newSongs.length % 50 === 0 || i === total - 1)) {
       updateScanProgress(i + 1, total, item.title || '…');
       await yieldToUI();
     }
   }
 
-  updateScanProgress(total, total, 'Đang lưu vào máy…');
-  await dbAddSongsBatch(newSongs);
-
-  if (addedCount > 0) {
-    state.songs = [
-      ...newSongs,
-      ...state.songs.filter(s => !newSongs.some(ns => ns.id === s.id))
-    ];
-    state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-    rebuildQueue(true);
-    renderTrackList();
-    updateLibraryBadges();
-
-    if (state.currentIndex === -1 && state.songs.length > 0) {
-      state.currentIndex = 0;
-      updateUIWithSong(state.songs[0]);
-    }
+  if (newSongs.length === 0) {
+    if (!silent) hideScanProgress(0, total);
+    return 0;
   }
 
-  hideScanProgress(addedCount, total);
+  // Newest MediaStore hits first among this batch
+  newSongs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+
+  if (!silent) updateScanProgress(total, total, 'Đang lưu vào máy…');
+  await dbAddSongsBatch(newSongs);
+
+  // Prepend only new tracks — O(new) vs full re-sort of whole library
+  const newIds = new Set(newSongs.map(s => s.id));
+  state.songs = [
+    ...newSongs,
+    ...state.songs.filter(s => !newIds.has(s.id))
+  ];
+
+  rebuildQueue(true);
+  renderTrackList();
+  updateLibraryBadges();
+
+  if (state.currentIndex === -1 && state.songs.length > 0) {
+    state.currentIndex = 0;
+    updateUIWithSong(state.songs[0]);
+  }
+
+  if (!silent) hideScanProgress(newSongs.length, total);
+  return newSongs.length;
 }
 
 // ==========================================
@@ -2481,11 +2605,16 @@ async function initApp() {
     if (state.songs.length > 0) {
       state.currentIndex = 0;
       updateUIWithSong(state.songs[0]);
-    } else if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-      // First run inside APK: Auto-scan all device audio automatically!
-      setTimeout(() => {
-        scanAllAudioNative();
-      }, 600);
+    }
+
+    // APK: auto MediaStore — full UI scan if empty, silent delta-refresh if library exists
+    if (isNativeApk()) {
+      setupNativeAutoRefresh();
+      if (state.songs.length === 0) {
+        setTimeout(() => { scanAllAudioNative(); }, 500);
+      } else {
+        setTimeout(() => { refreshNativeLibrarySilent(); }, 700);
+      }
     }
 
     // Register Service Worker for 100% Offline Capability & Auto-update
