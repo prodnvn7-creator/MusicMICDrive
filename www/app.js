@@ -327,7 +327,7 @@ async function updateDynamicMesh(imgUrl) {
 }
 
 // ==========================================
-// 4. SMART SHUFFLE (FISHER-YATES ALGORITHM)
+// 4. SEAMLESS SMART SHUFFLE (tempo-aware continuous mix)
 // ==========================================
 function fisherYatesShuffle(array) {
   const copy = [...array];
@@ -336,6 +336,164 @@ function fisherYatesShuffle(array) {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+function songById(id) {
+  return state.songs.find(s => s.id === id) || null;
+}
+
+/** Energy / tempo feel 0–100 (proxy BPM when real analysis unavailable) */
+function estimateEnergy(song) {
+  if (!song) return 50;
+  if (typeof song._energy === 'number') return song._energy;
+  const d = song.duration || 200;
+  const size = song.fileSize || 0;
+  const bitrate = d > 0 ? (size * 8) / d / 1000 : 160;
+  let e = 50;
+  e += Math.max(-22, Math.min(22, (205 - d) * 0.16));
+  e += Math.max(-14, Math.min(14, (bitrate - 160) * 0.07));
+  const artist = (song.artist || '').toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < artist.length; i++) hash = (hash * 33 + artist.charCodeAt(i)) & 255;
+  e += (hash % 13) - 6;
+  song._energy = Math.max(0, Math.min(100, e));
+  return song._energy;
+}
+
+function tempoBucket(song) {
+  const e = estimateEnergy(song);
+  if (e >= 72) return 3;
+  if (e >= 55) return 2;
+  if (e >= 38) return 1;
+  return 0;
+}
+
+function songAffinity(a, b) {
+  if (!a || !b) return 0;
+  let score = 0;
+  const aa = (a.artist || '').trim().toLowerCase();
+  const ba = (b.artist || '').trim().toLowerCase();
+  if (aa && ba && aa === ba) score += 4;
+  else if (aa && ba && (aa.includes(ba) || ba.includes(aa))) score += 2;
+
+  const al = (a.album || '').trim().toLowerCase();
+  const bl = (b.album || '').trim().toLowerCase();
+  if (al && bl && al === bl) score += 3;
+
+  if (tempoBucket(a) === tempoBucket(b)) score += 3;
+  else if (Math.abs(tempoBucket(a) - tempoBucket(b)) === 1) score += 1;
+
+  const energyDiff = Math.abs(estimateEnergy(a) - estimateEnergy(b));
+  if (energyDiff < 7) score += 3;
+  else if (energyDiff < 14) score += 2;
+  else if (energyDiff < 24) score += 1;
+
+  if (Math.abs((a.duration || 0) - (b.duration || 0)) <= 20) score += 1;
+  return score;
+}
+
+/**
+ * Random but continuous: greedy nearest-neighbor chain by tempo/artist affinity.
+ * Still feels shuffled, transitions stay natural.
+ */
+function buildSeamlessShuffleQueue(allIds, startId) {
+  if (!allIds.length) return [];
+  const remaining = new Set(allIds);
+  const queue = [];
+  let current = (startId && remaining.has(startId))
+    ? startId
+    : allIds[Math.floor(Math.random() * allIds.length)];
+
+  queue.push(current);
+  remaining.delete(current);
+
+  while (remaining.size > 0) {
+    const curSong = songById(current);
+    const scored = [];
+    remaining.forEach((id) => {
+      scored.push({
+        id,
+        score: songAffinity(curSong, songById(id)) + Math.random() * 1.35
+      });
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const topK = scored.slice(0, Math.min(6, scored.length));
+    const best = scored[0];
+    // Soft pick among top matches — keeps surprise without jarring jumps
+    let chosen = topK[Math.floor(Math.random() * topK.length)];
+    if (best && chosen && best.score - chosen.score > 2.8) chosen = best;
+    current = chosen.id;
+    queue.push(current);
+    remaining.delete(current);
+  }
+  return queue;
+}
+
+/** Live-optimize next few slots into a smooth affinity chain (shuffle mode). */
+function refineUpcomingSeamless(currentSong, depth = 4) {
+  if (!currentSong || state.queue.length < 3) return;
+  let anchor = currentSong;
+  const maxDepth = Math.min(depth, state.queue.length - 1);
+  for (let d = 1; d <= maxDepth; d++) {
+    const slot = (state.currentIndex + d) % state.queue.length;
+    let bestIdx = slot;
+    let bestScore = songAffinity(anchor, songById(state.queue[slot]));
+    const searchTo = Math.min(state.queue.length - 1, d + (state.isShuffle ? 14 : 6));
+    for (let off = d; off <= searchTo; off++) {
+      const idx = (state.currentIndex + off) % state.queue.length;
+      const score = songAffinity(anchor, songById(state.queue[idx]));
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = idx;
+      }
+    }
+    if (bestIdx !== slot && bestScore >= 1) {
+      const tmp = state.queue[slot];
+      state.queue[slot] = state.queue[bestIdx];
+      state.queue[bestIdx] = tmp;
+    }
+    anchor = songById(state.queue[slot]);
+  }
+}
+
+function promoteCompatibleNext(currentSong) {
+  if (!currentSong || state.queue.length < 3 || state.repeatMode === 'one') return;
+  if (state.isShuffle) {
+    refineUpcomingSeamless(currentSong, 5);
+    return;
+  }
+  const nextIdx = (state.currentIndex + 1) % state.queue.length;
+  let bestIdx = nextIdx;
+  let bestScore = songAffinity(currentSong, songById(state.queue[nextIdx]));
+  const windowSize = Math.min(8, state.queue.length - 1);
+  for (let off = 2; off <= windowSize; off++) {
+    const idx = (state.currentIndex + off) % state.queue.length;
+    const score = songAffinity(currentSong, songById(state.queue[idx]));
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  }
+  if (bestIdx !== nextIdx && bestScore >= 2) {
+    const tmp = state.queue[nextIdx];
+    state.queue[nextIdx] = state.queue[bestIdx];
+    state.queue[bestIdx] = tmp;
+  }
+}
+
+/** Blend length — shuffle uses longer “invisible” DJ crossfades */
+function getSmartBlendDuration(fromSong, toSong, timeLeft) {
+  const affinity = songAffinity(fromSong, toSong);
+  let base;
+  if (state.isShuffle) {
+    base = affinity >= 6 ? 3.6 : affinity >= 4 ? 3.1 : affinity >= 2 ? 2.6 : 2.15;
+  } else {
+    base = affinity >= 4 ? 2.35 : affinity >= 2 ? 1.85 : 1.35;
+  }
+  if (typeof timeLeft === 'number' && timeLeft > 0) {
+    base = Math.min(base, Math.max(state.isShuffle ? 1.6 : 1.1, timeLeft - 0.08));
+  }
+  return base;
 }
 
 function rebuildQueue(preserveCurrent = true) {
@@ -349,15 +507,9 @@ function rebuildQueue(preserveCurrent = true) {
   const currentSongId = getCurrentSong() ? getCurrentSong().id : null;
 
   if (state.isShuffle) {
-    if (preserveCurrent && currentSongId) {
-      // Keep current song at the head, shuffle the rest
-      const remaining = allIds.filter(id => id !== currentSongId);
-      state.queue = [currentSongId, ...fisherYatesShuffle(remaining)];
-      state.currentIndex = 0;
-    } else {
-      state.queue = fisherYatesShuffle(allIds);
-      state.currentIndex = currentSongId ? state.queue.indexOf(currentSongId) : 0;
-    }
+    // Seamless Smart Shuffle: random path, tempo-linked neighbors
+    state.queue = buildSeamlessShuffleQueue(allIds, preserveCurrent ? currentSongId : currentSongId);
+    state.currentIndex = 0;
   } else {
     state.queue = [...allIds];
     state.currentIndex = currentSongId ? state.queue.indexOf(currentSongId) : 0;
@@ -371,7 +523,11 @@ function toggleShuffle() {
   shuffleBtn.classList.toggle('text-pink-500', state.isShuffle);
   shuffleBtn.classList.toggle('text-white/60', !state.isShuffle);
   rebuildQueue(true);
-  // No toast — pink state is enough
+  if (state.isShuffle && shuffleBtn) {
+    shuffleBtn.title = 'Seamless Smart Shuffle — tự lọc tempo, chuyển bài liền mạch';
+  } else if (shuffleBtn) {
+    shuffleBtn.title = 'Smart Shuffle (Fisher-Yates)';
+  }
 }
 
 function toggleRepeat() {
@@ -394,63 +550,6 @@ function toggleRepeat() {
     repeatBtn.classList.remove('text-pink-500');
     repeatBtn.classList.add('text-white/60');
   }
-  // No toast — pink / badge state is enough
-}
-
-/** Crude tempo/energy bucket from duration (proxy when real BPM unavailable) */
-function tempoBucket(song) {
-  const d = (song && song.duration) || 200;
-  if (d < 150) return 3;
-  if (d < 210) return 2;
-  if (d < 280) return 1;
-  return 0;
-}
-
-function songAffinity(a, b) {
-  if (!a || !b) return 0;
-  let score = 0;
-  const aa = (a.artist || '').trim().toLowerCase();
-  const ba = (b.artist || '').trim().toLowerCase();
-  if (aa && ba && aa === ba) score += 3;
-  const al = (a.album || '').trim().toLowerCase();
-  const bl = (b.album || '').trim().toLowerCase();
-  if (al && bl && al === bl) score += 2;
-  if (tempoBucket(a) === tempoBucket(b)) score += 2;
-  if (Math.abs((a.duration || 0) - (b.duration || 0)) <= 25) score += 1;
-  return score;
-}
-
-/** Pull a more compatible upcoming track into the next slot (same artist / tempo feel). */
-function promoteCompatibleNext(currentSong) {
-  if (!currentSong || state.queue.length < 3 || state.repeatMode === 'one') return;
-  const nextIdx = (state.currentIndex + 1) % state.queue.length;
-  let bestIdx = nextIdx;
-  let bestScore = songAffinity(currentSong, state.songs.find(s => s.id === state.queue[nextIdx]));
-  const windowSize = Math.min(7, state.queue.length - 1);
-  for (let off = 2; off <= windowSize; off++) {
-    const idx = (state.currentIndex + off) % state.queue.length;
-    const song = state.songs.find(s => s.id === state.queue[idx]);
-    const score = songAffinity(currentSong, song);
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = idx;
-    }
-  }
-  if (bestIdx !== nextIdx && bestScore >= 2) {
-    const tmp = state.queue[nextIdx];
-    state.queue[nextIdx] = state.queue[bestIdx];
-    state.queue[bestIdx] = tmp;
-  }
-}
-
-/** Shorter, ear-friendly blend — longer only when songs feel related. */
-function getSmartBlendDuration(fromSong, toSong, timeLeft) {
-  const affinity = songAffinity(fromSong, toSong);
-  let base = affinity >= 4 ? 2.35 : affinity >= 2 ? 1.85 : 1.35;
-  if (typeof timeLeft === 'number' && timeLeft > 0) {
-    base = Math.min(base, Math.max(1.1, timeLeft - 0.12));
-  }
-  return base;
 }
 
 // ==========================================
@@ -512,7 +611,7 @@ async function playSongById(id, withCrossfade = true) {
 
   if (withCrossfade && !isBackgrounded && state.isPlaying) {
     const from = getCurrentSong();
-    performMashupTransition(song, getSmartBlendDuration(from, song, 2.2));
+    performMashupTransition(song, getSmartBlendDuration(from, song, state.isShuffle ? 2.8 : 2.2), from);
   } else {
     directPlaybackTransition(song);
   }
@@ -558,7 +657,7 @@ async function directPlaybackTransition(song) {
  * Overlaps outgoing outro with incoming intro seamlessly like an uninterrupted continuous EP mix.
  * Equal-Power Sinusoidal Gain maintains constant perceived acoustic energy so the beat never drops.
  */
-function performMashupTransition(nextSong, duration = 5.0) {
+function performMashupTransition(nextSong, duration = 5.0, fromSong = null) {
   if (state.isCrossfading || state.fadeInterval) {
     if (state.fadeInterval) {
       clearInterval(state.fadeInterval);
@@ -574,23 +673,23 @@ function performMashupTransition(nextSong, duration = 5.0) {
 
   const currentDeck = activeDeck;
   const targetDeck = inactiveDeck;
+  const affinity = songAffinity(fromSong || getCurrentSong(), nextSong);
 
   targetDeck.src = nextSong.audioUrl;
-  targetDeck.currentTime = 0;
+  // Tiny intro skip on strong matches — feels more like a continuous mix
+  targetDeck.currentTime = (state.isShuffle && affinity >= 4) ? 0.1 : 0;
   targetDeck.volume = 0;
 
-  // Immediately update UI, artwork, backdrop blur, lockscreen
   updateUIWithSong(nextSong);
   updateMediaSession(nextSong);
   renderTrackList();
 
   targetDeck.play().then(() => {
-    // Immediately swap activeDeck to targetDeck so scrubber and lockscreen track new song from 0:00!
     activeDeck = targetDeck;
     inactiveDeck = currentDeck;
 
-    const intervalTime = 30; // 30ms interval for silky continuous curve
-    const steps = Math.max(25, Math.round((duration * 1000) / intervalTime));
+    const intervalTime = 24; // denser steps = smoother ghost fade
+    const steps = Math.max(28, Math.round((duration * 1000) / intervalTime));
     let stepCount = 0;
 
     if (state.fadeInterval) clearInterval(state.fadeInterval);
@@ -598,8 +697,7 @@ function performMashupTransition(nextSong, duration = 5.0) {
       stepCount++;
       const progress = Math.min(1, stepCount / steps);
 
-      // Equal-power sinusoidal curve (cos & sin):
-      // cos^2(angle) + sin^2(angle) = 1.0 (Total acoustic energy remains 100% constant)
+      // Equal-power curve — perceived loudness stays flat across the blend
       const angle = progress * 0.5 * Math.PI;
       const fadeOut = Math.cos(angle);
       const fadeIn = Math.sin(angle);
@@ -643,7 +741,12 @@ function handleNext(manualTrigger = true) {
 
   const isBackgrounded = document.hidden === true;
   if (!isBackgrounded && state.isPlaying) {
-    performMashupTransition(nextSong, getSmartBlendDuration(fromSong, nextSong, manualTrigger ? 1.7 : 2.1));
+    const blend = getSmartBlendDuration(
+      fromSong,
+      nextSong,
+      manualTrigger ? (state.isShuffle ? 2.4 : 1.7) : (state.isShuffle ? 3.0 : 2.1)
+    );
+    performMashupTransition(nextSong, blend, fromSong);
   } else {
     directPlaybackTransition(nextSong);
   }
@@ -664,7 +767,7 @@ function handlePrev() {
 
   const isBackgrounded = document.hidden === true;
   if (!isBackgrounded && state.isPlaying) {
-    performMashupTransition(prevSong, getSmartBlendDuration(fromSong, prevSong, 1.5));
+    performMashupTransition(prevSong, getSmartBlendDuration(fromSong, prevSong, state.isShuffle ? 2.2 : 1.5), fromSong);
   } else {
     directPlaybackTransition(prevSong);
   }
@@ -710,13 +813,15 @@ function setupDeckEvents(deck) {
       remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, dur - cur));
     }
 
-    // Smart seamless blend near end — short ear-friendly crossfade + tempo/artist affinity
+    // Seamless auto-mix near end — shuffle uses longer invisible blends + tempo chain
     if (!state.isCrossfading && state.isPlaying && dur > 6) {
       const timeLeft = dur - cur;
       const currentSong = getCurrentSong();
+      const preloadAt = state.isShuffle ? 18 : 14;
+      const blendAt = state.isShuffle ? 3.5 : 2.6;
 
-      // Preload next deck early so blend starts without gap
-      if (timeLeft <= 14 && timeLeft > 3.2 && !document.hidden) {
+      if (timeLeft <= preloadAt && timeLeft > blendAt + 0.4 && !document.hidden) {
+        if (state.isShuffle) promoteCompatibleNext(currentSong);
         const upcoming = getNextSong();
         if (upcoming && upcoming.audioUrl && state.nextPreloadedId !== upcoming.id) {
           try {
@@ -727,14 +832,14 @@ function setupDeckEvents(deck) {
         }
       }
 
-      if (timeLeft <= 2.6 && timeLeft > 0.25 && !document.hidden) {
+      if (timeLeft <= blendAt && timeLeft > 0.2 && !document.hidden) {
         promoteCompatibleNext(currentSong);
         const nextSong = getNextSong();
         if (nextSong) {
           state.currentIndex = (state.currentIndex + 1) % state.queue.length;
           state.nextPreloadedId = null;
           const blendLead = getSmartBlendDuration(currentSong, nextSong, timeLeft);
-          performMashupTransition(nextSong, blendLead);
+          performMashupTransition(nextSong, blendLead, currentSong);
         }
       }
     }
@@ -1574,8 +1679,8 @@ function renderQueueList() {
   const currentSong = getCurrentSong();
   const upcomingQueue = state.queue.slice(state.currentIndex + 1);
 
-  queueSubtitle.textContent = state.isShuffle 
-    ? `Smart Shuffle (Fisher-Yates) • Còn ${upcomingQueue.length} bài tiếp theo`
+  queueSubtitle.textContent = state.isShuffle
+    ? `Seamless Mix • tự lọc tempo • Còn ${upcomingQueue.length} bài`
     : `Theo thứ tự • Còn ${upcomingQueue.length} bài tiếp theo`;
 
   let html = '';
@@ -2366,10 +2471,11 @@ function setupEventHandlers() {
     shuffleDot.classList.remove('hidden');
     shuffleBtn.classList.add('text-pink-500');
     shuffleBtn.classList.remove('text-white/60');
+    if (shuffleBtn) shuffleBtn.title = 'Seamless Smart Shuffle — tự lọc tempo, chuyển bài liền mạch';
     rebuildQueue(false);
     playSongById(state.queue[0], false);
     openFullPlayer();
-    showToast('Đã xáo trộn và phát thư viện!', '🔀');
+    showToast('Seamless Mix đang chạy', '✨');
   });
 
   // Scrubber / Seekbar
