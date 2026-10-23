@@ -268,25 +268,33 @@ html, body {
   visibility: visible;
 }
 
-/* During drag: no CSS transition fighting the finger */
+/* During drag: strong ghost sheet over the library */
 #fullPlayer.fp-dragging {
   --fp-ghost: 0;
   transition: none !important;
   will-change: transform, opacity;
-  /* Soft sheet edge while ghosting over the library */
-  box-shadow: 0 -12px 48px rgba(0, 0, 0, calc(0.45 * (1 - var(--fp-ghost, 0))));
+  box-shadow:
+    0 -16px 56px rgba(0, 0, 0, calc(0.55 * (1 - var(--fp-ghost, 0)))),
+    0 0 0 1px rgba(255, 255, 255, calc(0.12 + var(--fp-ghost, 0) * 0.18));
+  /* Frosted glass feel while fading */
+  -webkit-backdrop-filter: blur(calc(var(--fp-ghost, 0) * 10px));
+  backdrop-filter: blur(calc(var(--fp-ghost, 0) * 10px));
 }
 
-/* Soften expensive blur while dragging → less stutter + clearer ghost */
 #fullPlayer.fp-dragging #fullPlayerBackdropBlur {
   transition: none !important;
-  filter: blur(14px) !important;
+  filter: blur(10px) !important;
 }
 
 #fullPlayer.fp-dragging .artwork-img {
   transition: none !important;
-  /* Artwork softens with the ghost pull */
-  opacity: calc(1 - (var(--fp-ghost, 0) * 0.25));
+  opacity: calc(1 - (var(--fp-ghost, 0) * 0.55));
+  filter: saturate(calc(1 - var(--fp-ghost, 0) * 0.35));
+}
+
+#fullPlayer.fp-dragging #fpDragSurface,
+#fullPlayer.fp-dragging .px-7 {
+  opacity: calc(1 - (var(--fp-ghost, 0) * 0.2));
 }
 
 /* Spring snap-back */

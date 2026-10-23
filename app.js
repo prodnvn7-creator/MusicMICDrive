@@ -1783,26 +1783,27 @@ function fpResetDragVisual() {
   fpClearInlineSheet();
 }
 
-/** 1:1 finger follow + ghost fade (opacity) as sheet pulls down */
+/** 1:1 finger follow + strong ghost fade so library clearly shows through */
 function fpApplyPull(rawPull) {
   const h = window.innerHeight || 700;
   let y = Math.max(0, rawPull);
   const edge = h * 0.88;
   if (y > edge) y = edge + (y - edge) * 0.45;
 
-  // 0 → 1 as user pulls ~half screen
-  const progress = Math.min(1, y / (h * 0.48));
-  const scale = 1 - progress * 0.06;
-  const radius = progress * 34;
-  // Ghost: sheet becomes translucent so library shows through
-  const ghostOpacity = Math.max(0.36, 1 - progress * 0.58);
+  // Reach full ghost sooner (~28% screen) so the fade is obvious
+  const progress = Math.min(1, y / (h * 0.28));
+  const ease = progress * progress * (3 - 2 * progress); // smoothstep
+  const scale = 1 - ease * 0.1;
+  const radius = 12 + ease * 36;
+  // Strong ghost: 100% → ~22% opacity (library clearly visible underneath)
+  const ghostOpacity = Math.max(0.22, 1 - ease * 0.78);
 
   fullPlayer.style.transform = `translate3d(0, ${y}px, 0) scale(${scale})`;
   fullPlayer.style.borderRadius = `${radius}px ${radius}px 0 0`;
   fullPlayer.style.opacity = String(ghostOpacity);
-  fullPlayer.style.setProperty('--fp-ghost', String(progress));
+  fullPlayer.style.setProperty('--fp-ghost', String(ease));
   if (fullPlayerBackdropBlur) {
-    fullPlayerBackdropBlur.style.opacity = String(0.52 * (1 - progress * 0.85));
+    fullPlayerBackdropBlur.style.opacity = String(Math.max(0.08, 0.5 * (1 - ease * 0.95)));
   }
   fpDrag.pull = y;
 }
