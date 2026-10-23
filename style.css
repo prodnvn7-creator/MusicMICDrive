@@ -207,8 +207,10 @@ html, body {
 
 /* Full Screen Player Transition */
 #fullPlayer {
-  transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
+  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease;
   will-change: transform, opacity;
+  overscroll-behavior: none;
+  touch-action: pan-x;
 }
 
 #fullPlayer.hidden-player {

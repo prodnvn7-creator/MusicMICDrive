@@ -6,7 +6,7 @@
   <title>Music MIC Driver</title>
   
   <!-- PWA & Apple iOS Meta Tags -->
-  <link rel="manifest" href="manifest.json?v=6">
+  <link rel="manifest" href="manifest.json?v=7">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Music MIC Driver">
@@ -14,13 +14,13 @@
   <meta name="theme-color" content="#121c27">
   
   <!-- Icons -->
-  <link rel="icon" type="image/png" href="favicon.png?v=6">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=6">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=6">
+  <link rel="icon" type="image/png" href="favicon.png?v=8">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=8">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=8">
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=8">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -59,12 +59,20 @@
 
         <!-- Header Actions -->
         <div class="flex items-center gap-2">
-          <!-- Primary Scan / Import Music Button -->
-          <button id="scanMusicBtn" class="glass-pill px-3.5 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-400 shadow-md active:scale-95 transition-all bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30" title="Quét & nạp nhạc từ máy (Zalo, Tải về)">
+          <!-- Primary Scan Audio Button -->
+          <button id="scanMusicBtn" class="glass-pill px-3 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-400 shadow-md active:scale-95 transition-all bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30" title="Quét toàn bộ âm thanh trong máy">
             <svg id="scanMusicIcon" class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
+            </svg>
+            <span id="scanMusicBtnText">Quét nhạc</span>
+          </button>
+
+          <!-- Free File Browser Button -->
+          <button id="pickFileBtn" class="glass-pill px-3 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-semibold text-cyan-400 shadow-md active:scale-95 transition-all bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30" title="Chọn file nhạc từ thư mục bất kỳ trong máy">
+            <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
             </svg>
-            <span id="scanMusicBtnText">Quét & Thêm nhạc</span>
+            <span>Thêm file</span>
           </button>
 
           <!-- More Options Menu Button -->
@@ -123,15 +131,21 @@
         <p class="text-sm text-white/70 max-w-sm mb-6 leading-relaxed">
           Chạm vào nút bên dưới để quét toàn bộ bài hát trong máy (<span class="text-emerald-400 font-semibold">Tải về, Zalo, Thẻ nhớ...</span>). Ứng dụng sẽ <span class="text-cyan-400 font-semibold">tự động quét và lưu vĩnh viễn</span> vào máy của bạn!
         </p>
-        <div class="flex flex-col gap-3 w-full max-w-sm">
-          <button id="emptyStateScanBtn" class="w-full py-4 px-5 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-500 to-emerald-500 text-white font-bold text-sm sm:text-base shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2.5">
+        <div class="flex flex-col gap-2.5 w-full max-w-sm">
+          <button id="emptyStateScanBtn" class="w-full py-3.5 px-5 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-500 to-emerald-500 text-white font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2.5">
             <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
             </svg>
-            <span>🎵 QUÉT & NẠP TOÀN BỘ NHẠC TRONG MÁY</span>
+            <span>QUÉT TOÀN BỘ ÂM THANH TRONG MÁY</span>
+          </button>
+          <button id="emptyStatePickFileBtn" class="w-full py-3 px-5 rounded-2xl glass-pill text-white/90 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-2 border border-white/10 hover:bg-white/10">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+            </svg>
+            <span>CHỌN FILE TỪ THƯ MỤC BẤT KỲ</span>
           </button>
           <p class="text-[11px] text-white/50 text-center">
-            Mẹo: Khi cửa sổ máy hiện lên, chọn mục <b>Âm thanh</b> & bấm <b>Chọn tất cả</b> để nạp 1 chạm.
+            Mẹo: Khi quét âm thanh, bấm <b>"Chọn tất cả"</b>. Bài mới sẽ tự động hiển thị ở đầu danh sách.
           </p>
         </div>
       </div>
@@ -205,7 +219,7 @@
     </div>
 
     <!-- Drag Handle & Top Controls -->
-    <div class="px-6 pt-2 pb-1 flex flex-col items-center">
+    <div id="fullPlayerHeader" class="px-6 pt-2 pb-1 flex flex-col items-center cursor-pointer">
       <!-- Swipe Down Grab Bar -->
       <div id="swipeHandle" class="w-10 h-1.5 bg-white/30 rounded-full mb-3 cursor-pointer"></div>
 
@@ -233,19 +247,19 @@
 
     <!-- Center: Large Artwork with iOS Scale & Shadow Animation -->
     <div class="flex-1 flex items-center justify-center px-8 py-4 artwork-container">
-      <label for="coverPickerInput" class="relative w-full max-w-[340px] aspect-square flex items-center justify-center group cursor-pointer" id="artworkContainerBtn" title="Chạm để đổi ảnh bìa bài hát">
+      <div id="artworkContainerBtn" class="relative w-full max-w-[340px] aspect-square flex items-center justify-center group cursor-pointer" title="Chạm để đổi ảnh bìa bài hát">
         <img id="fullCover" src="logo.png" alt="Artwork" 
           class="artwork-img artwork-paused w-full h-full object-cover rounded-3xl border border-white/10 shadow-2xl">
-        <!-- Change Cover Badge -->
-        <div class="absolute bottom-3 right-3 glass-pill px-2.5 py-1 rounded-full text-xs text-white/90 bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 shadow-lg active:scale-95 pointer-events-none">
-          <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <!-- Change Cover Badge Button -->
+        <button type="button" id="changeCoverBadgeBtn" class="absolute bottom-3 right-3 glass-pill px-3 py-1.5 rounded-full text-xs text-white/90 bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 shadow-lg active:scale-90 transition-transform cursor-pointer">
+          <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
           </svg>
-          <span class="font-medium">Đổi ảnh</span>
-        </div>
-      </label>
-      <input type="file" id="coverPickerInput" accept="image/png,image/jpeg,image/webp,image/*" class="hidden">
+          <span class="font-medium">Đổi ảnh bìa</span>
+        </button>
+      </div>
+      <input type="file" id="coverPickerInput" accept="image/*" class="hidden">
     </div>
 
     <!-- Song Metadata, Scrubber & Playback Controls Area -->
@@ -330,17 +344,6 @@
         </svg>
       </div>
 
-      <!-- iOS Engine Mode & Crossfade / Mashup DJ Blend Pill -->
-      <div class="flex items-center justify-between text-[11px] text-white/50 pt-1 pb-2">
-        <button id="crossfadeToggleBtn" class="flex items-center gap-1.5 cursor-pointer glass-pill px-3 py-1 rounded-full text-xs active:scale-95 transition-all text-white/90" title="Chạm để chuyển đổi chế độ Mix Mashup DJ / Crossfade">
-          <span class="w-2 h-2 rounded-full bg-cyan-400 inline-block animate-pulse" id="crossfadeDot"></span>
-          <span id="crossfadeText" class="font-medium text-white/90">🎧 Mix Mashup: 5s DJ EP</span>
-        </button>
-        <div id="iosEngineBadge" class="flex items-center gap-1 font-mono text-[10px] text-emerald-400">
-          <span>● Màn hình mở (Gain Blend)</span>
-        </div>
-      </div>
-
     </div>
   </div>
 
@@ -370,9 +373,15 @@
       <h4 class="font-bold text-white text-base">Tùy chọn Thư viện</h4>
       <button id="modalScanAudioBtn" class="flex items-center gap-3 p-3 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-sm font-medium text-emerald-400">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
         </svg>
-        <span>Quét & Nạp thêm nhạc trong máy</span>
+        <span>Quét toàn bộ âm thanh trong máy</span>
+      </button>
+      <button id="modalPickFileBtn" class="flex items-center gap-3 p-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-sm font-medium text-cyan-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+        </svg>
+        <span>Chọn file từ thư mục bất kỳ</span>
       </button>
       <button id="modalChangeCoverBtn" class="flex items-center gap-3 p-3 rounded-xl bg-white/5 hover:bg-white/10 text-sm font-medium text-white">
         <svg class="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -403,10 +412,11 @@
   <audio id="deckA" preload="auto" playsinline webkit-playsinline></audio>
   <audio id="deckB" preload="auto" playsinline webkit-playsinline></audio>
 
-  <!-- Hidden Multi-file picker -->
-  <input type="file" id="fileInput" multiple accept="audio/*,audio/mpeg,audio/mp4,audio/x-m4a,audio/flac,audio/wav,audio/aac,audio/ogg,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.m4p" class="hidden">
+  <!-- Hidden Pickers: Fast Audio Scanner and Free Folder Picker -->
+  <input type="file" id="scanAudioInput" multiple accept="audio/*" class="hidden">
+  <input type="file" id="freeFileInput" multiple accept="*/*,audio/*,.mp3,.flac,.m4a,.wav,.aac,.ogg,.opus,.wma" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

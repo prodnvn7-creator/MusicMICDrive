@@ -39,16 +39,20 @@ const trackListEl = document.getElementById('trackList');
 const emptyStateEl = document.getElementById('emptyState');
 const trackCountBadge = document.getElementById('trackCountBadge');
 const storageInfoBadge = document.getElementById('storageInfoBadge');
-const fileInput = document.getElementById('fileInput');
+const scanAudioInput = document.getElementById('scanAudioInput');
+const freeFileInput = document.getElementById('freeFileInput');
 const coverPickerInput = document.getElementById('coverPickerInput');
 const scanMusicBtn = document.getElementById('scanMusicBtn');
 const scanMusicIcon = document.getElementById('scanMusicIcon');
 const scanMusicBtnText = document.getElementById('scanMusicBtnText');
+const pickFileBtn = document.getElementById('pickFileBtn');
 const emptyStateScanBtn = document.getElementById('emptyStateScanBtn');
+const emptyStatePickFileBtn = document.getElementById('emptyStatePickFileBtn');
 const searchInput = document.getElementById('searchInput');
 const clearSearchBtn = document.getElementById('clearSearchBtn');
 const quickShuffleAllBtn = document.getElementById('quickShuffleAllBtn');
 const modalScanAudioBtn = document.getElementById('modalScanAudioBtn');
+const modalPickFileBtn = document.getElementById('modalPickFileBtn');
 const modalChangeCoverBtn = document.getElementById('modalChangeCoverBtn');
 
 // Mini Player Elements
@@ -66,6 +70,7 @@ const miniPlayingIndicator = document.getElementById('miniPlayingIndicator');
 
 // Full Player Elements
 const fullPlayer = document.getElementById('fullPlayer');
+const fullPlayerHeader = document.getElementById('fullPlayerHeader');
 const closeFullPlayerBtn = document.getElementById('closeFullPlayerBtn');
 const swipeHandle = document.getElementById('swipeHandle');
 const fullCover = document.getElementById('fullCover');
@@ -89,10 +94,6 @@ const repeatBtn = document.getElementById('repeatBtn');
 const repeatDot = document.getElementById('repeatDot');
 const repeatOneBadge = document.getElementById('repeatOneBadge');
 const volumeBar = document.getElementById('volumeBar');
-const crossfadeToggleBtn = document.getElementById('crossfadeToggleBtn');
-const crossfadeDot = document.getElementById('crossfadeDot');
-const crossfadeText = document.getElementById('crossfadeText');
-const iosEngineBadge = document.getElementById('iosEngineBadge');
 
 // Queue & Options Modal Elements
 const openQueueBtn = document.getElementById('openQueueBtn');
@@ -385,7 +386,7 @@ function getPrevSong() {
 /**
  * Play a specific song by ID
  */
-async function playSongById(id, withCrossfade = false) {
+async function playSongById(id, withCrossfade = true) {
   const index = state.queue.indexOf(id);
   if (index === -1) {
     // If not in queue, re-add
@@ -401,8 +402,8 @@ async function playSongById(id, withCrossfade = false) {
   // Check iOS Background vs Foreground state
   const isBackgrounded = document.hidden === true;
 
-  if (withCrossfade && state.mixMode !== 'direct' && !isBackgrounded && state.isPlaying) {
-    performMashupTransition(song, state.mixMode === 'mashup' ? 4.0 : 3.0);
+  if (withCrossfade && !isBackgrounded && state.isPlaying) {
+    performMashupTransition(song, 5.0);
   } else {
     directPlaybackTransition(song);
   }
@@ -444,21 +445,21 @@ async function directPlaybackTransition(song) {
 }
 
 /**
- * Intelligent Seamless Mashup DJ Blend Transition
- * Overlaps outgoing outro with incoming intro over 4-5 seconds like an uninterrupted continuous EP mix.
+ * Intelligent Seamless Mashup DJ Blend Transition (Permanent Background DJ Engine)
+ * Overlaps outgoing outro with incoming intro seamlessly like an uninterrupted continuous EP mix.
  * Equal-Power Sinusoidal Gain maintains constant perceived acoustic energy so the beat never drops.
  */
 function performMashupTransition(nextSong, duration = 5.0) {
-  if (state.isCrossfading) {
-    // If user rapidly skips while already blending, smoothly stop previous transition
+  if (state.isCrossfading || state.fadeInterval) {
     if (state.fadeInterval) {
       clearInterval(state.fadeInterval);
       state.fadeInterval = null;
     }
     state.isCrossfading = false;
-    activeDeck.pause();
-    activeDeck.currentTime = 0;
-    activeDeck.volume = state.masterVolume;
+    deckA.pause();
+    deckB.pause();
+    deckA.volume = state.masterVolume;
+    deckB.volume = state.masterVolume;
   }
   state.isCrossfading = true;
 
@@ -475,7 +476,11 @@ function performMashupTransition(nextSong, duration = 5.0) {
   renderTrackList();
 
   targetDeck.play().then(() => {
-    const intervalTime = 40; // 40ms interval for silky continuous curve
+    // Immediately swap activeDeck to targetDeck so scrubber and lockscreen track new song from 0:00!
+    activeDeck = targetDeck;
+    inactiveDeck = currentDeck;
+
+    const intervalTime = 30; // 30ms interval for silky continuous curve
     const steps = Math.max(25, Math.round((duration * 1000) / intervalTime));
     let stepCount = 0;
 
@@ -484,26 +489,22 @@ function performMashupTransition(nextSong, duration = 5.0) {
       stepCount++;
       const progress = Math.min(1, stepCount / steps);
 
-      // Equal-power sinusoidal curve:
+      // Equal-power sinusoidal curve (cos & sin):
       // cos^2(angle) + sin^2(angle) = 1.0 (Total acoustic energy remains 100% constant)
       const angle = progress * 0.5 * Math.PI;
       const fadeOut = Math.cos(angle);
       const fadeIn = Math.sin(angle);
 
-      currentDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeOut));
-      targetDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeIn));
+      inactiveDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeOut));
+      activeDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeIn));
 
       if (stepCount >= steps) {
         clearInterval(state.fadeInterval);
         state.fadeInterval = null;
-        currentDeck.pause();
-        currentDeck.currentTime = 0;
-        currentDeck.volume = state.masterVolume;
-        targetDeck.volume = state.masterVolume;
-
-        // Swap active and inactive decks
-        activeDeck = targetDeck;
-        inactiveDeck = currentDeck;
+        inactiveDeck.pause();
+        inactiveDeck.currentTime = 0;
+        inactiveDeck.volume = state.masterVolume;
+        activeDeck.volume = state.masterVolume;
         state.isCrossfading = false;
       }
     }, intervalTime);
@@ -526,16 +527,15 @@ function handleNext(manualTrigger = true) {
   state.currentIndex = (state.currentIndex + 1) % state.queue.length;
 
   const isBackgrounded = document.hidden === true;
-  if (!isBackgrounded && state.isPlaying && state.mixMode !== 'direct') {
-    const duration = state.mixMode === 'mashup' ? (manualTrigger ? 4.0 : 5.0) : 3.0;
-    performMashupTransition(nextSong, duration);
+  if (!isBackgrounded && state.isPlaying) {
+    // 5.0s continuous DJ blend
+    performMashupTransition(nextSong, 5.0);
   } else {
     directPlaybackTransition(nextSong);
   }
 }
 
 function handlePrev() {
-  // If song played for more than 3 seconds, restart it
   if (activeDeck.currentTime > 3) {
     activeDeck.currentTime = 0;
     return;
@@ -547,9 +547,8 @@ function handlePrev() {
   state.currentIndex = (state.currentIndex - 1 + state.queue.length) % state.queue.length;
 
   const isBackgrounded = document.hidden === true;
-  if (!isBackgrounded && state.isPlaying && state.mixMode !== 'direct') {
-    const duration = state.mixMode === 'mashup' ? 3.5 : 3.0;
-    performMashupTransition(prevSong, duration);
+  if (!isBackgrounded && state.isPlaying) {
+    performMashupTransition(prevSong, 4.0);
   } else {
     directPlaybackTransition(prevSong);
   }
@@ -595,16 +594,16 @@ function setupDeckEvents(deck) {
       remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, dur - cur));
     }
 
-    // Intelligent Mashup / Crossfade check before track ends
-    // Overlaps outgoing & incoming tracks like a live continuous DJ mix / mashup EP
-    if (state.mixMode !== 'direct' && !state.isCrossfading && state.isPlaying && dur > 8) {
-      const blendLead = state.mixMode === 'mashup' ? 5.0 : 3.0;
+    // Intelligent 5-second DJ Mashup blend before track ends
+    // Outro melts into intro seamlessly like a non-stop continuous EP
+    if (!state.isCrossfading && state.isPlaying && dur > 8) {
       const timeLeft = dur - cur;
-      if (timeLeft <= blendLead && timeLeft > 0.4) {
+      if (timeLeft <= 5.0 && timeLeft > 0.4) {
         if (!document.hidden) {
           const nextSong = getNextSong();
           if (nextSong) {
             state.currentIndex = (state.currentIndex + 1) % state.queue.length;
+            const blendLead = Math.min(5.0, Math.max(1.8, timeLeft));
             performMashupTransition(nextSong, blendLead);
           }
         }
@@ -617,6 +616,20 @@ function setupDeckEvents(deck) {
 
   // Track ended event (Seamless direct handoff for iOS background mode)
   deck.addEventListener('ended', () => {
+    if (deck === inactiveDeck) {
+      deck.pause();
+      deck.currentTime = 0;
+      deck.volume = state.masterVolume;
+      if (state.isCrossfading) {
+        if (state.fadeInterval) {
+          clearInterval(state.fadeInterval);
+          state.fadeInterval = null;
+        }
+        activeDeck.volume = state.masterVolume;
+        state.isCrossfading = false;
+      }
+      return;
+    }
     if (deck !== activeDeck) return;
     if (state.isCrossfading) return;
 
@@ -625,6 +638,18 @@ function setupDeckEvents(deck) {
       deck.play();
     } else {
       handleNext(false);
+    }
+  });
+
+  // Dynamic accurate duration update when metadata is loaded
+  deck.addEventListener('loadedmetadata', () => {
+    if (deck === activeDeck && deck.duration) {
+      const currentSong = getCurrentSong();
+      if (currentSong && (!currentSong.duration || Math.abs(currentSong.duration - deck.duration) > 1)) {
+        currentSong.duration = deck.duration;
+        dbAddSong(currentSong);
+        renderTrackList();
+      }
     }
   });
 
@@ -741,35 +766,48 @@ async function handleAudioFiles(files) {
   });
 
   if (newFiles.length === 0) {
-    showToast('Tất cả bài hát đã có trong thư viện, không có bài mới!', '✅');
+    showToast('Tất cả bài hát đã có trong thư viện!', '✅');
     return;
   }
 
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang nạp...';
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
   if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
-  showToast(`Đang quét & nạp ${newFiles.length} bài hát vào máy...`, '⏳');
+  showToast(`⚡ Đang quét siêu tốc ${newFiles.length} bài hát mới...`, '⏳');
 
   let addedCount = 0;
-  for (let i = 0; i < newFiles.length; i++) {
-    const file = newFiles[i];
-    try {
-      const songData = await parseAudioFile(file);
-      await dbAddSong(songData);
-      state.songs.push(songData);
-      addedCount++;
-    } catch (err) {
-      console.error('Error importing file:', file.name, err);
+  const newSongs = [];
+  const baseTimestamp = Date.now();
+
+  // Process files in fast parallel batches of 8 workers
+  const BATCH_SIZE = 8;
+  for (let i = 0; i < newFiles.length; i += BATCH_SIZE) {
+    const chunk = newFiles.slice(i, i + BATCH_SIZE);
+    const parsedChunk = await Promise.all(
+      chunk.map((file, idx) => parseAudioFile(file, baseTimestamp + (newFiles.length - (i + idx)) * 100))
+    );
+
+    for (const songData of parsedChunk) {
+      if (songData) {
+        await dbAddSong(songData);
+        newSongs.push(songData);
+        addedCount++;
+      }
     }
   }
 
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét & Thêm nhạc';
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét nhạc';
   if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
 
   if (addedCount > 0) {
+    // Put newly added songs at the TOP of the library
+    state.songs.unshift(...newSongs);
+    // Sort all songs: Newest first!
+    state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+
     rebuildQueue(true);
     renderTrackList();
     updateLibraryBadges();
-    showToast(`🎉 Đã quét & thêm thành công ${addedCount} bài hát vào thư viện!`, '🎵');
+    showToast(`🎉 Đã thêm ${addedCount} bài hát mới lên đầu danh sách!`, '🎵');
 
     if (state.currentIndex === -1 && state.songs.length > 0) {
       state.currentIndex = 0;
@@ -778,7 +816,7 @@ async function handleAudioFiles(files) {
   }
 }
 
-function parseAudioFile(file) {
+function parseAudioFile(file, timestamp) {
   return new Promise((resolve) => {
     const songId = 'mm_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
     const audioUrl = URL.createObjectURL(file);
@@ -798,7 +836,7 @@ function parseAudioFile(file) {
       resolve(meta);
     };
 
-    // Safety timeout: max 2.5s per song so parsing never freezes
+    // Fast 1200ms safety timeout to guarantee instant response
     const timeoutHandle = setTimeout(() => {
       safeResolve({
         id: songId,
@@ -812,86 +850,70 @@ function parseAudioFile(file) {
         coverUrl: 'logo.png',
         fileName: file.name,
         fileSize: file.size,
-        addedAt: Date.now()
+        addedAt: timestamp || Date.now()
       });
-    }, 2500);
+    }, 1200);
 
-    // Read ID3 tags directly via jsmediatags
-    const readTags = new Promise((res) => {
-      if (window.jsmediatags) {
-        window.jsmediatags.read(file, {
-          onSuccess: (tag) => {
-            const tags = tag.tags || {};
-            const title = tags.title ? String(tags.title).trim() : defaultTitle;
-            const artist = tags.artist ? String(tags.artist).trim() : defaultArtist;
-            const album = tags.album ? String(tags.album).trim() : "Music MIC Driver";
-            let coverBlob = null;
-            let coverUrl = 'logo.png';
+    if (window.jsmediatags) {
+      window.jsmediatags.read(file, {
+        onSuccess: (tag) => {
+          clearTimeout(timeoutHandle);
+          const tags = tag.tags || {};
+          const title = tags.title ? String(tags.title).trim() : defaultTitle;
+          const artist = tags.artist ? String(tags.artist).trim() : defaultArtist;
+          const album = tags.album ? String(tags.album).trim() : "Music MIC Driver";
+          let coverBlob = null;
+          let coverUrl = 'logo.png';
 
-            if (tags.picture && tags.picture.data && tags.picture.data.length > 0) {
-              try {
-                let mime = tags.picture.format || 'image/jpeg';
-                if (!mime.includes('/')) {
-                  mime = (mime.toLowerCase() === 'png') ? 'image/png' : 'image/jpeg';
-                }
-                const byteArray = new Uint8Array(tags.picture.data);
-                coverBlob = new Blob([byteArray], { type: mime });
-                coverUrl = URL.createObjectURL(coverBlob);
-              } catch (e) {
-                console.warn('Cover blob extraction failed:', e);
-                coverBlob = null;
-                coverUrl = 'logo.png';
+          if (tags.picture && tags.picture.data && tags.picture.data.length > 0) {
+            try {
+              let mime = tags.picture.format || 'image/jpeg';
+              if (!mime.includes('/')) {
+                mime = (mime.toLowerCase() === 'png') ? 'image/png' : 'image/jpeg';
               }
+              const byteArray = new Uint8Array(tags.picture.data);
+              coverBlob = new Blob([byteArray], { type: mime });
+              coverUrl = URL.createObjectURL(coverBlob);
+            } catch (e) {
+              coverBlob = null;
+              coverUrl = 'logo.png';
             }
-            res({ title, artist, album, coverBlob, coverUrl });
-          },
-          onError: () => {
-            res({ title: defaultTitle, artist: defaultArtist, album: "Music MIC Driver", coverBlob: null, coverUrl: 'logo.png' });
           }
-        });
-      } else {
-        res({ title: defaultTitle, artist: defaultArtist, album: "Music MIC Driver", coverBlob: null, coverUrl: 'logo.png' });
-      }
-    });
 
-    // Read duration in parallel with quick 700ms timeout
-    const readDuration = new Promise((res) => {
-      const tempAudio = new Audio();
-      tempAudio.preload = 'metadata';
-      const clean = () => { tempAudio.src = ''; };
-      tempAudio.onloadedmetadata = () => {
-        const d = tempAudio.duration || 0;
-        clean();
-        res(d);
-      };
-      tempAudio.onerror = () => {
-        clean();
-        res(0);
-      };
-      setTimeout(() => {
-        clean();
-        res(0);
-      }, 700);
-      tempAudio.src = audioUrl;
-    });
-
-    Promise.all([readTags, readDuration]).then(([tagsData, duration]) => {
-      clearTimeout(timeoutHandle);
-      safeResolve({
-        id: songId,
-        title: tagsData.title || defaultTitle,
-        artist: tagsData.artist || defaultArtist,
-        album: tagsData.album || "Music MIC Driver",
-        duration: duration || 0,
-        audioBlob: file,
-        audioUrl,
-        coverBlob: tagsData.coverBlob,
-        coverUrl: tagsData.coverUrl || 'logo.png',
-        fileName: file.name,
-        fileSize: file.size,
-        addedAt: Date.now()
+          safeResolve({
+            id: songId,
+            title,
+            artist,
+            album,
+            duration: 0,
+            audioBlob: file,
+            audioUrl,
+            coverBlob,
+            coverUrl,
+            fileName: file.name,
+            fileSize: file.size,
+            addedAt: timestamp || Date.now()
+          });
+        },
+        onError: () => {
+          clearTimeout(timeoutHandle);
+          safeResolve({
+            id: songId,
+            title: defaultTitle,
+            artist: defaultArtist,
+            album: "Music MIC Driver",
+            duration: 0,
+            audioBlob: file,
+            audioUrl,
+            coverBlob: null,
+            coverUrl: 'logo.png',
+            fileName: file.name,
+            fileSize: file.size,
+            addedAt: timestamp || Date.now()
+          });
+        }
       });
-    }).catch(() => {
+    } else {
       clearTimeout(timeoutHandle);
       safeResolve({
         id: songId,
@@ -905,9 +927,9 @@ function parseAudioFile(file) {
         coverUrl: 'logo.png',
         fileName: file.name,
         fileSize: file.size,
-        addedAt: Date.now()
+        addedAt: timestamp || Date.now()
       });
-    });
+    }
   });
 }
 
@@ -1124,17 +1146,83 @@ miniPlayerCard.addEventListener('touchend', (e) => {
   }
 }, { passive: true });
 
-// Swipe down on full player header to close
-swipeHandle.addEventListener('touchstart', (e) => {
-  touchStartY = e.touches[0].clientY;
+// Swipe down anywhere on Full Player to dismiss (Interactive Pull-Down)
+let fpTouchStartY = 0;
+let fpTouchStartX = 0;
+let fpIsDragging = false;
+let fpMoved = false;
+
+fullPlayer.addEventListener('touchstart', (e) => {
+  // Ignore touches on seekbar, volume slider, buttons, or photo picker badge
+  if (e.target.closest('input[type="range"]') || 
+      e.target.closest('#bigPlayBtn') || 
+      e.target.closest('#nextBtn') || 
+      e.target.closest('#prevBtn') || 
+      e.target.closest('#shuffleBtn') || 
+      e.target.closest('#repeatBtn') || 
+      e.target.closest('#favoriteBtn') || 
+      e.target.closest('#openQueueBtn') ||
+      e.target.closest('#changeCoverBadgeBtn')) {
+    fpIsDragging = false;
+    return;
+  }
+  fpIsDragging = true;
+  fpMoved = false;
+  fpTouchStartY = e.touches[0].clientY;
+  fpTouchStartX = e.touches[0].clientX;
 }, { passive: true });
 
-swipeHandle.addEventListener('touchend', (e) => {
+fullPlayer.addEventListener('touchmove', (e) => {
+  if (!fpIsDragging) return;
+  const currentY = e.touches[0].clientY;
+  const currentX = e.touches[0].clientX;
+  const deltaY = currentY - fpTouchStartY;
+  const deltaX = Math.abs(currentX - fpTouchStartX);
+
+  // If dragging downward and vertical movement dominates
+  if (deltaY > 8 && deltaY > deltaX) {
+    fpMoved = true;
+    if (e.cancelable) e.preventDefault();
+    fullPlayer.style.transition = 'none';
+    fullPlayer.style.transform = `translateY(${deltaY}px)`;
+  }
+}, { passive: false });
+
+fullPlayer.addEventListener('touchend', (e) => {
+  if (!fpIsDragging) return;
+  fpIsDragging = false;
   const touchEndY = e.changedTouches[0].clientY;
-  if (touchEndY - touchStartY > 40) {
-    closeFullPlayer();
+  const touchEndX = e.changedTouches[0].clientX;
+  const deltaY = touchEndY - fpTouchStartY;
+  const deltaX = Math.abs(touchEndX - fpTouchStartX);
+
+  if (fpMoved && deltaY > 60 && deltaY > deltaX) {
+    // Silky smooth slide out to dismiss
+    fullPlayer.style.transition = 'transform 0.28s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.25s ease';
+    fullPlayer.style.transform = 'translateY(105%)';
+    setTimeout(() => {
+      closeFullPlayer();
+      fullPlayer.style.transform = '';
+      fullPlayer.style.transition = '';
+    }, 280);
+  } else if (fpMoved) {
+    // Snap back smoothly up to 0%
+    fullPlayer.style.transition = 'transform 0.24s cubic-bezier(0.25, 1, 0.5, 1)';
+    fullPlayer.style.transform = 'translateY(0%)';
+    setTimeout(() => {
+      fullPlayer.style.transform = '';
+      fullPlayer.style.transition = '';
+    }, 240);
   }
 }, { passive: true });
+
+if (fullPlayerHeader) {
+  fullPlayerHeader.addEventListener('click', (e) => {
+    if (!e.target.closest('button') && !fpMoved) {
+      closeFullPlayer();
+    }
+  });
+}
 
 function openFullPlayer() {
   fullPlayer.classList.remove('hidden-player');
@@ -1174,26 +1262,50 @@ function escapeHtml(text) {
 // 11. EVENT HANDLERS & BINDINGS
 // ==========================================
 function setupEventHandlers() {
-  // Unified Audio Importer (Mobile-Safe Native File & Audio Picker)
-  function triggerAudioImport() {
-    if (fileInput) fileInput.click();
+  // Fast Audio Scanner (Direct system audio tab)
+  function triggerAudioScan() {
+    if (scanAudioInput) scanAudioInput.click();
   }
 
-  if (scanMusicBtn) scanMusicBtn.addEventListener('click', () => triggerAudioImport());
-  if (emptyStateScanBtn) emptyStateScanBtn.addEventListener('click', () => triggerAudioImport());
+  // Free Folder / File Picker (Browse any folder freely)
+  function triggerFreeFilePicker() {
+    if (freeFileInput) freeFileInput.click();
+  }
+
+  if (scanMusicBtn) scanMusicBtn.addEventListener('click', () => triggerAudioScan());
+  if (emptyStateScanBtn) emptyStateScanBtn.addEventListener('click', () => triggerAudioScan());
   if (modalScanAudioBtn) {
     modalScanAudioBtn.addEventListener('click', () => {
       optionsModal.classList.add('hidden');
       optionsModal.classList.remove('flex');
-      triggerAudioImport();
+      triggerAudioScan();
     });
   }
 
-  if (fileInput) {
-    fileInput.addEventListener('change', (e) => {
+  if (pickFileBtn) pickFileBtn.addEventListener('click', () => triggerFreeFilePicker());
+  if (emptyStatePickFileBtn) emptyStatePickFileBtn.addEventListener('click', () => triggerFreeFilePicker());
+  if (modalPickFileBtn) {
+    modalPickFileBtn.addEventListener('click', () => {
+      optionsModal.classList.add('hidden');
+      optionsModal.classList.remove('flex');
+      triggerFreeFilePicker();
+    });
+  }
+
+  if (scanAudioInput) {
+    scanAudioInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length > 0) {
         handleAudioFiles(e.target.files);
-        fileInput.value = '';
+        scanAudioInput.value = '';
+      }
+    });
+  }
+
+  if (freeFileInput) {
+    freeFileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleAudioFiles(e.target.files);
+        freeFileInput.value = '';
       }
     });
   }
@@ -1331,26 +1443,6 @@ function setupEventHandlers() {
     showToast('Đã xáo trộn và phát thư viện!', '🔀');
   });
 
-  // Mashup Mix / Crossfade Toggle Pill
-  crossfadeToggleBtn.addEventListener('click', () => {
-    if (state.mixMode === 'mashup') {
-      state.mixMode = 'crossfade';
-      crossfadeDot.className = 'w-2 h-2 rounded-full bg-emerald-400 inline-block';
-      crossfadeText.textContent = '⚡ Crossfade: 3s';
-      showToast('⚡ Chế độ Crossfade: 3 giây', '🎛️');
-    } else if (state.mixMode === 'crossfade') {
-      state.mixMode = 'direct';
-      crossfadeDot.className = 'w-2 h-2 rounded-full bg-gray-500 inline-block';
-      crossfadeText.textContent = '⏹️ Chuyển bài: Trực tiếp';
-      showToast('⏹️ Chuyển bài: Trực tiếp (Không hòa âm)', '⏭️');
-    } else {
-      state.mixMode = 'mashup';
-      crossfadeDot.className = 'w-2 h-2 rounded-full bg-cyan-400 inline-block animate-pulse';
-      crossfadeText.textContent = '🎧 Mix Mashup: 5s DJ EP';
-      showToast('🎧 Chế độ Mix Mashup: Bật (Hòa âm 5s liền mạch như đĩa EP)', '🎶');
-    }
-  });
-
   // Scrubber / Seekbar
   seekBar.addEventListener('mousedown', () => { state.isDraggingSeek = true; });
   seekBar.addEventListener('touchstart', () => { state.isDraggingSeek = true; }, { passive: true });
@@ -1406,16 +1498,41 @@ function setupEventHandlers() {
     });
   }
 
+  const artworkContainerBtn = document.getElementById('artworkContainerBtn');
+  const changeCoverBadgeBtn = document.getElementById('changeCoverBadgeBtn');
+
+  const triggerChangeCover = () => {
+    const currentSong = getCurrentSong();
+    if (!currentSong) {
+      showToast('Hãy chọn hoặc phát một bài hát để đổi ảnh bìa', '⚠️');
+      return;
+    }
+    if (coverPickerInput) {
+      coverPickerInput.value = '';
+      coverPickerInput.click();
+    }
+  };
+
+  if (changeCoverBadgeBtn) {
+    changeCoverBadgeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      triggerChangeCover();
+    });
+  }
+
+  if (artworkContainerBtn) {
+    artworkContainerBtn.addEventListener('click', (e) => {
+      if (!fpMoved) {
+        triggerChangeCover();
+      }
+    });
+  }
+
   if (modalChangeCoverBtn) {
     modalChangeCoverBtn.addEventListener('click', () => {
       optionsModal.classList.add('hidden');
       optionsModal.classList.remove('flex');
-      const currentSong = getCurrentSong();
-      if (!currentSong) {
-        showToast('Hãy chọn hoặc phát một bài hát để đổi ảnh bìa', '⚠️');
-        return;
-      }
-      if (coverPickerInput) coverPickerInput.click();
+      triggerChangeCover();
     });
   }
 
@@ -1501,6 +1618,9 @@ async function initApp() {
         coverUrl
       };
     });
+
+    // Sắp xếp bài mới nạp lên trước, bài cũ sau
+    state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
 
     rebuildQueue(false);
     renderTrackList();
