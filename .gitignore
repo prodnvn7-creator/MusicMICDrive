@@ -6,3 +6,16 @@ Desktop.ini
 # Temporary files
 *.tmp
 *.log
+
+# Node dependencies
+node_modules/
+
+# Android build outputs & caches
+.gradle/
+build/
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+*.apk
+*.aab

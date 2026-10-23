@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Music MIC Driver - Core Application Logic
  * Standard Apple Music iOS PWA with Smooth Crossfade & Smart Fisher-Yates Shuffle
  */
@@ -1333,13 +1333,111 @@ function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Native Android MediaStore Audio Scanner (Automatic Zero-Prompt 371+ Song Detection)
+async function scanAllAudioNative() {
+  if (!window.Capacitor || !window.Capacitor.Plugins || !window.Capacitor.Plugins.MediaStoreScanner) {
+    if (scanAudioInput) scanAudioInput.click();
+    return;
+  }
+
+  showToast('⚡ Đang tự động quét toàn bộ bài hát trong máy...', '⏳');
+  showScanProgress(100);
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Đang quét...';
+  if (scanMusicIcon) scanMusicIcon.classList.add('animate-spin');
+
+  try {
+    const res = await window.Capacitor.Plugins.MediaStoreScanner.scanAllAudio();
+    if (res && res.songs && res.songs.length > 0) {
+      await handleNativeSongs(res.songs);
+    } else {
+      hideScanProgress(0, 0);
+      showToast('Không tìm thấy bài hát nào trên thiết bị', '⚠️');
+    }
+  } catch (err) {
+    console.warn('Native MediaStore scan error:', err);
+    hideScanProgress(0, 0);
+    showToast('Chưa cấp quyền bộ nhớ: ' + (err.message || err), '⚠️');
+    if (scanAudioInput) scanAudioInput.click();
+  } finally {
+    if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét nhạc';
+    if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
+  }
+}
+
+async function handleNativeSongs(nativeList) {
+  const total = nativeList.length;
+  showScanProgress(total);
+
+  let addedCount = 0;
+  const newSongs = [];
+  const baseTs = Date.now();
+
+  for (let i = 0; i < nativeList.length; i++) {
+    const item = nativeList[i];
+    const exists = state.songs.some(s => s.fileName === item.fileName && Math.abs((s.fileSize || 0) - (item.size || 0)) < 512);
+    if (!exists) {
+      let audioUrl = item.contentUri;
+      if (window.Capacitor && window.Capacitor.convertFileSrc && item.path) {
+        audioUrl = window.Capacitor.convertFileSrc(item.path);
+      }
+
+      const songData = {
+        id: item.id || ('mm_nat_' + baseTs + '_' + i),
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        duration: item.duration || 0,
+        audioBlob: null,
+        audioUrl: audioUrl,
+        nativePath: item.path,
+        nativeUri: item.contentUri,
+        coverBlob: null,
+        coverUrl: item.albumArtUri || 'logo.png',
+        fileName: item.fileName,
+        fileSize: item.size,
+        addedAt: item.addedAt || (baseTs + (total - i) * 10),
+        isNative: true
+      };
+
+      try { await dbAddSong(songData); } catch (e) {}
+      newSongs.push(songData);
+      addedCount++;
+    }
+
+    updateScanProgress(i + 1, total, item.title);
+  }
+
+  if (addedCount > 0) {
+    state.songs = [
+      ...newSongs,
+      ...state.songs.filter(s => !newSongs.some(ns => ns.id === s.id))
+    ];
+    state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    rebuildQueue(true);
+    renderTrackList();
+    updateLibraryBadges();
+
+    if (state.currentIndex === -1 && state.songs.length > 0) {
+      state.currentIndex = 0;
+      updateUIWithSong(state.songs[0]);
+    }
+  }
+
+  hideScanProgress(addedCount, total);
+  showToast(`🎉 Tự động quét sạch ${addedCount} bài hát trong máy! Tổng: ${state.songs.length} bài`, '🎵');
+}
+
 // ==========================================
 // 11. EVENT HANDLERS & BINDINGS
 // ==========================================
 function setupEventHandlers() {
-  // Comprehensive Audio Scanner (Direct all audio tab & system media)
+  // Comprehensive Audio Scanner (Auto MediaStore on APK, File Picker on PWA)
   function triggerAudioScan() {
-    if (scanAudioInput) scanAudioInput.click();
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      scanAllAudioNative();
+    } else if (scanAudioInput) {
+      scanAudioInput.click();
+    }
   }
 
   // Recursive Folder Scanner (Scans all subfolders for 371+ songs)
@@ -1715,18 +1813,22 @@ async function initApp() {
     await initDB();
     const storedSongs = await dbGetAllSongs();
 
-    // Reconstruct audio URLs and cover URLs from stored Blobs
+    // Reconstruct audio URLs and cover URLs from stored Blobs or Native device paths
     state.songs = storedSongs.map(s => {
-      let audioUrl = '';
-      if (s.audioBlob instanceof Blob) {
+      let audioUrl = s.audioUrl || '';
+      if (s.isNative && s.nativePath && window.Capacitor && window.Capacitor.convertFileSrc) {
+        audioUrl = window.Capacitor.convertFileSrc(s.nativePath);
+      } else if (s.audioBlob instanceof Blob) {
         audioUrl = URL.createObjectURL(s.audioBlob);
       }
-      let coverUrl = 'logo.png';
+
+      let coverUrl = s.coverUrl || 'logo.png';
       if (s.coverBlob instanceof Blob) {
         coverUrl = URL.createObjectURL(s.coverBlob);
       } else if (typeof s.coverBlob === 'string' && s.coverBlob.length > 0) {
         coverUrl = s.coverBlob;
       }
+
       return {
         ...s,
         audioUrl,
@@ -1745,6 +1847,11 @@ async function initApp() {
     if (state.songs.length > 0) {
       state.currentIndex = 0;
       updateUIWithSong(state.songs[0]);
+    } else if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      // First run inside APK: Auto-scan all device audio automatically!
+      setTimeout(() => {
+        scanAllAudioNative();
+      }, 600);
     }
 
     // Register Service Worker for 100% Offline Capability & Auto-update

@@ -1,0 +1,9 @@
+{
+  "appId": "com.musicmicdriver.app",
+  "appName": "Music MIC Driver",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true
+  }
+}

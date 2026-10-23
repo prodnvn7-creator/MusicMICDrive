@@ -1,0 +1,27 @@
+{
+  "name": "nghe-nhac-truc-tuyen",
+  "version": "1.0.0",
+  "description": "> **Trình phát nhạc Offline cá nhân theo chuẩn PWA mang phong cách iOS Apple Music.**",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prodnvn7-creator/MusicMICDrive.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/prodnvn7-creator/MusicMICDrive/issues"
+  },
+  "homepage": "https://github.com/prodnvn7-creator/MusicMICDrive#readme",
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  }
+}

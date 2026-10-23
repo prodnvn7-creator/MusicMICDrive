@@ -1,0 +1,258 @@
+/* Music MIC Driver - Apple Music Style Stylesheet */
+
+:root {
+  --c1: #38bdf8;
+  --c2: #2563eb;
+  --c3: #06b6d4;
+  --c4: #121c27;
+  --glow-rgb: 56, 189, 248;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #08080c;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  letter-spacing: -0.015em;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Optimized Dynamic Apple Music Ambient Mesh (Hardware-Accelerated, Zero Overheating) */
+.mesh-bg-container {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background-color: #08080c;
+  background-image: 
+    radial-gradient(circle at 15% 20%, var(--c1) 0%, transparent 60%),
+    radial-gradient(circle at 85% 80%, var(--c2) 0%, transparent 60%),
+    radial-gradient(circle at 75% 25%, var(--c3) 0%, transparent 50%);
+  opacity: 0.85;
+  transition: background-image 1.5s ease, background-color 1.5s ease;
+  transform: translateZ(0); /* Force GPU composite layer */
+}
+
+.mesh-blob, .mesh-overlay {
+  display: none;
+}
+
+/* Glassmorphism Classes */
+.glass-panel {
+  background: rgba(28, 28, 34, 0.65);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-pill {
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.glass-pill:active {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Artwork Animations (Apple Music iOS Spec) */
+.artwork-container {
+  perspective: 1000px;
+}
+
+.artwork-img {
+  transition: transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.45s ease;
+  will-change: transform, box-shadow;
+}
+
+.artwork-playing {
+  transform: scale(1.0);
+  box-shadow: 0 24px 60px -10px rgba(var(--glow-rgb), 0.55), 0 12px 30px rgba(0, 0, 0, 0.7);
+}
+
+.artwork-paused {
+  transform: scale(0.88);
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.55);
+}
+
+/* Custom Seekbar (Scrubber) */
+.range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  outline: none;
+  cursor: pointer;
+  position: relative;
+  transition: height 0.15s ease;
+}
+
+.range-slider:active, .range-slider:hover {
+  height: 8px;
+}
+
+.range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.range-slider:active::-webkit-slider-thumb {
+  transform: scale(1.3);
+}
+
+.range-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+/* Volume Slider */
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  outline: none;
+  cursor: pointer;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* Track item hover & active states */
+.track-item {
+  transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+.track-item:active {
+  background-color: rgba(255, 255, 255, 0.1);
+  transform: scale(0.985);
+}
+
+/* Hide native scrollbars but keep scrolling smooth */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Safe areas */
+.safe-pt {
+  padding-top: max(16px, env(safe-area-inset-top));
+}
+
+.safe-pb {
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+
+/* Animated Sound Wave in active playing track */
+.sound-wave-bar {
+  display: inline-block;
+  width: 3px;
+  background-color: #fa233b;
+  border-radius: 2px;
+  animation: waveMotion 1s ease-in-out infinite alternate;
+}
+
+.sound-wave-bar:nth-child(1) { height: 12px; animation-delay: 0.1s; }
+.sound-wave-bar:nth-child(2) { height: 18px; animation-delay: 0.3s; }
+.sound-wave-bar:nth-child(3) { height: 8px;  animation-delay: 0.2s; }
+.sound-wave-bar:nth-child(4) { height: 15px; animation-delay: 0.4s; }
+
+@keyframes waveMotion {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}
+
+/* Full Screen Player Transition */
+#fullPlayer {
+  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease;
+  will-change: transform, opacity;
+  overscroll-behavior: none;
+  touch-action: pan-x;
+}
+
+#fullPlayer.hidden-player {
+  transform: translateY(105%);
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+#fullPlayer.visible-player {
+  transform: translateY(0%);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Toast Notification */
+#toast {
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease;
+}
+
+#toast.show {
+  transform: translate(-50%, 0);
+  opacity: 1;
+}
+
+#toast.hide {
+  transform: translate(-50%, 20px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Scan Progress Overlay animation */
+#scanProgressOverlay {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+#scanProgressBar {
+  min-width: 2%;
+  transition: width 0.25s ease-out;
+}
