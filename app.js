@@ -1535,12 +1535,23 @@ async function initApp() {
       updateUIWithSong(state.songs[0]);
     }
 
-    // Register Service Worker for 100% Offline Capability
+    // Register Service Worker for 100% Offline Capability & Auto-update
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
-          .then((reg) => console.log('Service Worker Registered! Scope:', reg.scope))
+          .then((reg) => {
+            console.log('Service Worker Registered! Scope:', reg.scope);
+            reg.update();
+          })
           .catch((err) => console.warn('Service Worker registration failed:', err));
+
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (!refreshing) {
+            refreshing = true;
+            window.location.reload();
+          }
+        });
       });
     }
 

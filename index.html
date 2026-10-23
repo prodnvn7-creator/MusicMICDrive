@@ -6,7 +6,7 @@
   <title>Music MIC Driver</title>
   
   <!-- PWA & Apple iOS Meta Tags -->
-  <link rel="manifest" href="manifest.json">
+  <link rel="manifest" href="manifest.json?v=4">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Music MIC Driver">
@@ -14,13 +14,13 @@
   <meta name="theme-color" content="#121c27">
   
   <!-- Icons -->
-  <link rel="icon" type="image/png" href="favicon.png">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="favicon.png?v=4">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=4">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=4">
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=4">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -135,28 +135,26 @@
     <!-- Library Track List View -->
     <main id="libraryView" class="flex-1 overflow-y-auto px-4 pb-32 no-scrollbar">
       <!-- Empty Library State -->
-      <div id="emptyState" class="flex flex-col items-center justify-center text-center py-16 px-6">
-        <div class="w-24 h-24 rounded-3xl bg-gradient-to-tr from-pink-500/30 to-purple-500/20 flex items-center justify-center border border-white/10 shadow-2xl mb-6">
-          <svg class="w-12 h-12 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
-          </svg>
+      <div id="emptyState" class="flex flex-col items-center justify-center text-center py-12 px-6">
+        <div class="w-24 h-24 rounded-3xl overflow-hidden border border-white/20 shadow-2xl mb-5 p-1 bg-[#121c27]">
+          <img src="logo.png" alt="Logo" class="w-full h-full object-cover rounded-2xl">
         </div>
-        <h3 class="text-xl font-bold text-white mb-2">Thư viện trống</h3>
-        <p class="text-sm text-white/60 max-w-sm mb-6 leading-relaxed">
-          Chỉ cần chọn thư mục chứa nhạc (<span class="text-emerald-400 font-medium">Download, Zalo, Music...</span>), ứng dụng sẽ <span class="text-white font-semibold">tự động quét toàn bộ bài hát</span> và <span class="text-pink-400 font-semibold">tự động cập nhật bài mới</span> mỗi khi bạn tải về.
+        <h3 class="text-xl font-bold text-white mb-2">Thư viện chưa có nhạc</h3>
+        <p class="text-sm text-white/70 max-w-sm mb-6 leading-relaxed">
+          Bấm nút bên dưới để chọn thư mục chứa nhạc (<span class="text-emerald-400 font-semibold">Download, Zalo, Music...</span>), ứng dụng sẽ <span class="text-cyan-400 font-semibold">tự động quét toàn bộ bài hát</span> và <span class="text-emerald-400 font-semibold">tự động cập nhật bài mới</span> mỗi khi bạn tải về.
         </p>
-        <div class="flex flex-col sm:flex-row gap-3 w-full max-w-sm">
-          <button id="emptyStateFolderBtn" class="flex-1 px-5 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-semibold text-xs shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div class="flex flex-col gap-3 w-full max-w-sm">
+          <button id="emptyStateFolderBtn" class="w-full py-4 px-5 rounded-2xl bg-gradient-to-r from-cyan-500 via-teal-500 to-emerald-500 text-white font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2.5">
+            <svg class="w-5 h-5 text-white animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
             </svg>
-            <span>Quét cả Thư mục (Zalo/Tải về)</span>
+            <span>📁 QUÉT CẢ THƯ MỤC NHẠC (Zalo/Tải về)</span>
           </button>
-          <button id="emptyStateImportBtn" class="px-5 py-3.5 rounded-2xl glass-pill text-white/80 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-1.5">
+          <button id="emptyStateImportBtn" class="w-full py-3 px-5 rounded-2xl glass-pill text-white/80 font-semibold text-xs active:scale-95 transition-all flex items-center justify-center gap-1.5">
             <svg class="w-4 h-4 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 4v16m8-8H4"/>
             </svg>
-            <span>Chọn file lẻ</span>
+            <span>Hoặc chọn file nhạc lẻ (.mp3, .flac)</span>
           </button>
         </div>
       </div>
@@ -423,6 +421,6 @@
   <input type="file" id="folderInput" webkitdirectory directory multiple accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
