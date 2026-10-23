@@ -33,84 +33,25 @@ html, body {
   -webkit-user-select: none;
 }
 
-/* Dynamic Animated Mesh Gradient */
+/* Optimized Dynamic Apple Music Ambient Mesh (Hardware-Accelerated, Zero Overheating) */
 .mesh-bg-container {
   position: fixed;
   inset: 0;
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
-  background-color: var(--c4);
-  transition: background-color 1.5s ease;
+  background-color: #08080c;
+  background-image: 
+    radial-gradient(circle at 15% 20%, var(--c1) 0%, transparent 60%),
+    radial-gradient(circle at 85% 80%, var(--c2) 0%, transparent 60%),
+    radial-gradient(circle at 75% 25%, var(--c3) 0%, transparent 50%);
+  opacity: 0.85;
+  transition: background-image 1.5s ease, background-color 1.5s ease;
+  transform: translateZ(0); /* Force GPU composite layer */
 }
 
-.mesh-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  opacity: 0.65;
-  mix-blend-mode: screen;
-  will-change: transform, background-color;
-  transition: background-color 1.5s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.mesh-blob-1 {
-  top: -15%;
-  left: -10%;
-  width: 75vw;
-  height: 75vw;
-  max-width: 550px;
-  max-height: 550px;
-  background: var(--c1);
-  animation: meshDrift1 18s ease-in-out infinite alternate;
-}
-
-.mesh-blob-2 {
-  bottom: -10%;
-  right: -10%;
-  width: 80vw;
-  height: 80vw;
-  max-width: 600px;
-  max-height: 600px;
-  background: var(--c2);
-  animation: meshDrift2 22s ease-in-out infinite alternate;
-}
-
-.mesh-blob-3 {
-  top: 35%;
-  right: 15%;
-  width: 60vw;
-  height: 60vw;
-  max-width: 450px;
-  max-height: 450px;
-  background: var(--c3);
-  animation: meshDrift3 20s ease-in-out infinite alternate;
-}
-
-.mesh-overlay {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at center, rgba(10, 10, 15, 0.45) 0%, rgba(8, 8, 12, 0.88) 100%);
-  backdrop-filter: blur(40px);
-  -webkit-backdrop-filter: blur(40px);
-}
-
-@keyframes meshDrift1 {
-  0% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(15%, 25%) scale(1.15); }
-  100% { transform: translate(-10%, 15%) scale(0.9); }
-}
-
-@keyframes meshDrift2 {
-  0% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(-20%, -15%) scale(1.1); }
-  100% { transform: translate(10%, -25%) scale(0.95); }
-}
-
-@keyframes meshDrift3 {
-  0% { transform: translate(0, 0) scale(0.9); }
-  50% { transform: translate(-15%, 15%) scale(1.2); }
-  100% { transform: translate(20%, -10%) scale(1); }
+.mesh-blob, .mesh-overlay {
+  display: none;
 }
 
 /* Glassmorphism Classes */
@@ -274,6 +215,7 @@ html, body {
   transform: translateY(105%);
   opacity: 0;
   pointer-events: none;
+  visibility: hidden;
 }
 
 #fullPlayer.visible-player {
