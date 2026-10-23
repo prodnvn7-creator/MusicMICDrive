@@ -19,12 +19,13 @@ const state = {
   isPlaying: false,
   isShuffle: false,
   repeatMode: 'all',   // 'off' | 'all' | 'one'
-  mixMode: 'mashup',   // 'mashup' (5s DJ EP blend) | 'crossfade' (3s) | 'direct'
+  mixMode: 'smart',    // smart equal-power blend (affinity-based length)
   masterVolume: 1.0,
   isCrossfading: false,
   fadeInterval: null,
   isDraggingSeek: false,
-  searchQuery: ''
+  searchQuery: '',
+  nextPreloadedId: null
 };
 
 // Dual Audio Deck References
@@ -48,15 +49,12 @@ const scanMusicIcon = document.getElementById('scanMusicIcon');
 const scanMusicBtnText = document.getElementById('scanMusicBtnText');
 const pickFileBtn = document.getElementById('pickFileBtn');
 const emptyStateScanBtn = document.getElementById('emptyStateScanBtn');
-const emptyStateScanFolderBtn = document.getElementById('emptyStateScanFolderBtn');
 const emptyStatePickFileBtn = document.getElementById('emptyStatePickFileBtn');
 const searchInput = document.getElementById('searchInput');
 const clearSearchBtn = document.getElementById('clearSearchBtn');
 const quickShuffleAllBtn = document.getElementById('quickShuffleAllBtn');
 const modalScanAudioBtn = document.getElementById('modalScanAudioBtn');
-const modalScanFolderBtn = document.getElementById('modalScanFolderBtn');
 const modalPickFileBtn = document.getElementById('modalPickFileBtn');
-const modalChangeCoverBtn = document.getElementById('modalChangeCoverBtn');
 
 // Mini Player Elements
 const miniPlayerDock = document.getElementById('miniPlayerDock');
@@ -335,9 +333,8 @@ function toggleShuffle() {
   shuffleDot.classList.toggle('hidden', !state.isShuffle);
   shuffleBtn.classList.toggle('text-pink-500', state.isShuffle);
   shuffleBtn.classList.toggle('text-white/60', !state.isShuffle);
-
   rebuildQueue(true);
-  showToast(state.isShuffle ? 'Smart Shuffle: Bật (Fisher-Yates)' : 'Smart Shuffle: Tắt', '🔀');
+  // No toast — pink state is enough
 }
 
 function toggleRepeat() {
@@ -347,22 +344,76 @@ function toggleRepeat() {
     repeatOneBadge.classList.add('hidden');
     repeatBtn.classList.add('text-pink-500');
     repeatBtn.classList.remove('text-white/60');
-    showToast('Lặp lại: Tất cả danh sách', '🔁');
   } else if (state.repeatMode === 'all') {
     state.repeatMode = 'one';
     repeatDot.classList.add('hidden');
     repeatOneBadge.classList.remove('hidden');
     repeatBtn.classList.add('text-pink-500');
     repeatBtn.classList.remove('text-white/60');
-    showToast('Lặp lại: 1 bài hát', '🔂');
   } else {
     state.repeatMode = 'off';
     repeatDot.classList.add('hidden');
     repeatOneBadge.classList.add('hidden');
     repeatBtn.classList.remove('text-pink-500');
     repeatBtn.classList.add('text-white/60');
-    showToast('Lặp lại: Tắt', '⏹️');
   }
+  // No toast — pink / badge state is enough
+}
+
+/** Crude tempo/energy bucket from duration (proxy when real BPM unavailable) */
+function tempoBucket(song) {
+  const d = (song && song.duration) || 200;
+  if (d < 150) return 3;
+  if (d < 210) return 2;
+  if (d < 280) return 1;
+  return 0;
+}
+
+function songAffinity(a, b) {
+  if (!a || !b) return 0;
+  let score = 0;
+  const aa = (a.artist || '').trim().toLowerCase();
+  const ba = (b.artist || '').trim().toLowerCase();
+  if (aa && ba && aa === ba) score += 3;
+  const al = (a.album || '').trim().toLowerCase();
+  const bl = (b.album || '').trim().toLowerCase();
+  if (al && bl && al === bl) score += 2;
+  if (tempoBucket(a) === tempoBucket(b)) score += 2;
+  if (Math.abs((a.duration || 0) - (b.duration || 0)) <= 25) score += 1;
+  return score;
+}
+
+/** Pull a more compatible upcoming track into the next slot (same artist / tempo feel). */
+function promoteCompatibleNext(currentSong) {
+  if (!currentSong || state.queue.length < 3 || state.repeatMode === 'one') return;
+  const nextIdx = (state.currentIndex + 1) % state.queue.length;
+  let bestIdx = nextIdx;
+  let bestScore = songAffinity(currentSong, state.songs.find(s => s.id === state.queue[nextIdx]));
+  const windowSize = Math.min(7, state.queue.length - 1);
+  for (let off = 2; off <= windowSize; off++) {
+    const idx = (state.currentIndex + off) % state.queue.length;
+    const song = state.songs.find(s => s.id === state.queue[idx]);
+    const score = songAffinity(currentSong, song);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  }
+  if (bestIdx !== nextIdx && bestScore >= 2) {
+    const tmp = state.queue[nextIdx];
+    state.queue[nextIdx] = state.queue[bestIdx];
+    state.queue[bestIdx] = tmp;
+  }
+}
+
+/** Shorter, ear-friendly blend — longer only when songs feel related. */
+function getSmartBlendDuration(fromSong, toSong, timeLeft) {
+  const affinity = songAffinity(fromSong, toSong);
+  let base = affinity >= 4 ? 2.35 : affinity >= 2 ? 1.85 : 1.35;
+  if (typeof timeLeft === 'number' && timeLeft > 0) {
+    base = Math.min(base, Math.max(1.1, timeLeft - 0.12));
+  }
+  return base;
 }
 
 // ==========================================
@@ -423,7 +474,8 @@ async function playSongById(id, withCrossfade = true) {
   const isBackgrounded = document.hidden === true;
 
   if (withCrossfade && !isBackgrounded && state.isPlaying) {
-    performMashupTransition(song, 5.0);
+    const from = getCurrentSong();
+    performMashupTransition(song, getSmartBlendDuration(from, song, 2.2));
   } else {
     directPlaybackTransition(song);
   }
@@ -536,6 +588,11 @@ function performMashupTransition(nextSong, duration = 5.0) {
 }
 
 function handleNext(manualTrigger = true) {
+  const fromSong = getCurrentSong();
+  if (!document.hidden && state.isPlaying) {
+    promoteCompatibleNext(fromSong);
+  }
+
   const nextSong = getNextSong();
   if (!nextSong) {
     activeDeck.pause();
@@ -545,11 +602,11 @@ function handleNext(manualTrigger = true) {
   }
 
   state.currentIndex = (state.currentIndex + 1) % state.queue.length;
+  state.nextPreloadedId = null;
 
   const isBackgrounded = document.hidden === true;
   if (!isBackgrounded && state.isPlaying) {
-    // 5.0s continuous DJ blend
-    performMashupTransition(nextSong, 5.0);
+    performMashupTransition(nextSong, getSmartBlendDuration(fromSong, nextSong, manualTrigger ? 1.7 : 2.1));
   } else {
     directPlaybackTransition(nextSong);
   }
@@ -561,14 +618,16 @@ function handlePrev() {
     return;
   }
 
+  const fromSong = getCurrentSong();
   const prevSong = getPrevSong();
   if (!prevSong) return;
 
   state.currentIndex = (state.currentIndex - 1 + state.queue.length) % state.queue.length;
+  state.nextPreloadedId = null;
 
   const isBackgrounded = document.hidden === true;
   if (!isBackgrounded && state.isPlaying) {
-    performMashupTransition(prevSong, 4.0);
+    performMashupTransition(prevSong, getSmartBlendDuration(fromSong, prevSong, 1.5));
   } else {
     directPlaybackTransition(prevSong);
   }
@@ -614,18 +673,31 @@ function setupDeckEvents(deck) {
       remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, dur - cur));
     }
 
-    // Intelligent 5-second DJ Mashup blend before track ends
-    // Outro melts into intro seamlessly like a non-stop continuous EP
-    if (!state.isCrossfading && state.isPlaying && dur > 8) {
+    // Smart seamless blend near end — short ear-friendly crossfade + tempo/artist affinity
+    if (!state.isCrossfading && state.isPlaying && dur > 6) {
       const timeLeft = dur - cur;
-      if (timeLeft <= 5.0 && timeLeft > 0.4) {
-        if (!document.hidden) {
-          const nextSong = getNextSong();
-          if (nextSong) {
-            state.currentIndex = (state.currentIndex + 1) % state.queue.length;
-            const blendLead = Math.min(5.0, Math.max(1.8, timeLeft));
-            performMashupTransition(nextSong, blendLead);
-          }
+      const currentSong = getCurrentSong();
+
+      // Preload next deck early so blend starts without gap
+      if (timeLeft <= 14 && timeLeft > 3.2 && !document.hidden) {
+        const upcoming = getNextSong();
+        if (upcoming && upcoming.audioUrl && state.nextPreloadedId !== upcoming.id) {
+          try {
+            inactiveDeck.src = upcoming.audioUrl;
+            inactiveDeck.load();
+            state.nextPreloadedId = upcoming.id;
+          } catch (e) {}
+        }
+      }
+
+      if (timeLeft <= 2.6 && timeLeft > 0.25 && !document.hidden) {
+        promoteCompatibleNext(currentSong);
+        const nextSong = getNextSong();
+        if (nextSong) {
+          state.currentIndex = (state.currentIndex + 1) % state.queue.length;
+          state.nextPreloadedId = null;
+          const blendLead = getSmartBlendDuration(currentSong, nextSong, timeLeft);
+          performMashupTransition(nextSong, blendLead);
         }
       }
     }
@@ -697,17 +769,9 @@ function setupDeckEvents(deck) {
 setupDeckEvents(deckA);
 setupDeckEvents(deckB);
 
-// Page Visibility API handler (iOS Screen Locked vs Screen On)
+// Page Visibility API — keep dual-deck safe when backgrounded (no missing DOM badge)
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    // Screen is OFF or backgrounded on iOS
-    iosEngineBadge.innerHTML = '<span>🔒 Direct Gapless (iOS An toàn)</span>';
-    iosEngineBadge.className = 'flex items-center gap-1 font-mono text-[10px] text-emerald-400';
-  } else {
-    // Screen is ON
-    iosEngineBadge.innerHTML = '<span>⚡ Mashup 5s DJ Blend</span>';
-    iosEngineBadge.className = 'flex items-center gap-1 font-mono text-[10px] text-white/50';
-  }
+  // Intentionally silent: blend vs direct is chosen at transition time via document.hidden
 });
 
 // ==========================================
@@ -850,31 +914,122 @@ async function scanDirectoryRecursively(dirHandle) {
  * Directly parses audio container headers (MP3, WAV, FLAC, M4A/AAC)
  * without WebAudio decode and without instantiating frozen new Audio() tags.
  */
+function readMvhdDuration(u8, view) {
+  for (let i = 0; i <= u8.length - 24; i++) {
+    if (u8[i] === 0x6D && u8[i + 1] === 0x76 && u8[i + 2] === 0x68 && u8[i + 3] === 0x64) {
+      const version = u8[i + 4];
+      let timescale = 0;
+      let durationUnits = 0;
+      if (version === 0 && i + 24 <= u8.length) {
+        timescale = view.getUint32(i + 16, false);
+        durationUnits = view.getUint32(i + 20, false);
+      } else if (version === 1 && i + 36 <= u8.length) {
+        timescale = view.getUint32(i + 24, false);
+        durationUnits = (view.getUint32(i + 28, false) * 4294967296) + view.getUint32(i + 32, false);
+      }
+      if (timescale > 0 && durationUnits > 0) {
+        return Math.max(1, Math.round(durationUnits / timescale));
+      }
+    }
+  }
+  return 0;
+}
+
+/** Accurate duration via HTMLAudioElement metadata (fixes wrong list times for real files). */
+function probeDurationWithAudio(src) {
+  return new Promise((resolve) => {
+    if (!src) return resolve(0);
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    let objectUrl = null;
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        audio.removeAttribute('src');
+        audio.load();
+      } catch (e) {}
+      if (objectUrl) {
+        try { URL.revokeObjectURL(objectUrl); } catch (e) {}
+      }
+      resolve(val > 0 && Number.isFinite(val) ? Math.round(val) : 0);
+    };
+    const timer = setTimeout(() => finish(0), 10000);
+    audio.addEventListener('loadedmetadata', () => finish(audio.duration));
+    audio.addEventListener('error', () => finish(0));
+    try {
+      if (src instanceof Blob) {
+        objectUrl = URL.createObjectURL(src);
+        audio.src = objectUrl;
+      } else {
+        audio.src = src;
+      }
+    } catch (e) {
+      finish(0);
+    }
+  });
+}
+
+async function repairDurationsInBackground(songs) {
+  const list = (songs || []).filter(s => s && (s.audioBlob || s.audioUrl) && !s.isDemo);
+  if (list.length === 0) return;
+  let cursor = 0;
+  const workers = 2;
+
+  async function worker() {
+    while (cursor < list.length) {
+      const song = list[cursor++];
+      if (!song || song._durationVerified) continue;
+      const src = song.audioBlob || song.audioUrl;
+      const dur = await probeDurationWithAudio(src);
+      song._durationVerified = true;
+      if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
+        song.duration = dur;
+        try { await dbAddSong(song); } catch (e) {}
+        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+        if (mono) mono.textContent = formatTime(dur, '--:--');
+        const current = getCurrentSong();
+        if (current && current.id === song.id && remainingTimeDisplay) {
+          const left = Math.max(0, dur - (activeDeck.currentTime || 0));
+          remainingTimeDisplay.textContent = '-' + formatTime(left);
+        }
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+}
+
+/**
+ * Fast header parse (MP3/WAV/FLAC/M4A). Background probe corrects remaining errors.
+ */
 async function fastGetAudioDuration(file) {
   if (!file || !file.size) return 0;
 
   try {
-    const sliceSize = Math.min(file.size, 32768);
+    const sliceSize = Math.min(file.size, 65536);
     const arrayBuffer = await file.slice(0, sliceSize).arrayBuffer();
     const u8 = new Uint8Array(arrayBuffer);
     const view = new DataView(arrayBuffer);
 
-    // 1. WAV Header
+    // 1. WAV
     if (u8.length >= 44 && u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46 &&
         u8[8] === 0x57 && u8[9] === 0x41 && u8[10] === 0x56 && u8[11] === 0x45) {
       let offset = 12;
       while (offset + 8 <= u8.length) {
         const chunkId = view.getUint32(offset, false);
         const chunkSize = view.getUint32(offset + 4, true);
-        if (chunkId === 0x666d7420) { // 'fmt '
+        if (chunkId === 0x666d7420) {
           const byteRate = view.getUint32(offset + 16, true);
           if (byteRate > 0) return Math.max(1, Math.round((file.size - 44) / byteRate));
         }
-        offset += 8 + chunkSize;
+        offset += 8 + chunkSize + (chunkSize % 2);
       }
     }
 
-    // 2. FLAC Header
+    // 2. FLAC
     if (u8.length >= 26 && u8[0] === 0x66 && u8[1] === 0x4C && u8[2] === 0x61 && u8[3] === 0x43) {
       const blockType = u8[4] & 0x7F;
       if (blockType === 0) {
@@ -886,26 +1041,19 @@ async function fastGetAudioDuration(file) {
       }
     }
 
-    // 3. M4A / AAC / MP4 (search for 'mvhd' atom)
-    for (let i = 0; i <= u8.length - 24; i++) {
-      if (u8[i] === 0x6D && u8[i+1] === 0x76 && u8[i+2] === 0x68 && u8[i+3] === 0x64) {
-        const version = u8[i + 4];
-        let timescale = 0, durationUnits = 0;
-        if (version === 0 && i + 24 <= u8.length) {
-          timescale = view.getUint32(i + 16, false);
-          durationUnits = view.getUint32(i + 20, false);
-        } else if (version === 1 && i + 36 <= u8.length) {
-          timescale = view.getUint32(i + 24, false);
-          durationUnits = (view.getUint32(i + 28, false) * 4294967296) + view.getUint32(i + 32, false);
-        }
-        if (timescale > 0 && durationUnits > 0) return Math.max(1, Math.round(durationUnits / timescale));
-      }
+    // 3. M4A / MP4 — head + tail (moov often at end)
+    let m4aDur = readMvhdDuration(u8, view);
+    if (!m4aDur && file.size > sliceSize) {
+      const tailSize = Math.min(file.size, 196608);
+      const tailBuf = await file.slice(file.size - tailSize).arrayBuffer();
+      m4aDur = readMvhdDuration(new Uint8Array(tailBuf), new DataView(tailBuf));
     }
+    if (m4aDur > 0) return m4aDur;
 
-    // 4. MP3 Header
+    // 4. MP3
     let id3Size = 0;
     let scanOffset = 0;
-    if (u8.length >= 10 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) { // 'ID3'
+    if (u8.length >= 10 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) {
       id3Size = ((u8[6] & 0x7F) << 21) | ((u8[7] & 0x7F) << 14) | ((u8[8] & 0x7F) << 7) | (u8[9] & 0x7F);
       scanOffset = 10 + id3Size;
       if (u8[5] & 0x10) scanOffset += 10;
@@ -915,9 +1063,8 @@ async function fastGetAudioDuration(file) {
     let mp3View = view;
     let localOffset = scanOffset;
 
-    // If ID3v2 tag extends beyond 32KB buffer, grab 16KB right after tag
     if (scanOffset >= u8.length && scanOffset < file.size) {
-      const extraChunk = await file.slice(scanOffset, Math.min(file.size, scanOffset + 16384)).arrayBuffer();
+      const extraChunk = await file.slice(scanOffset, Math.min(file.size, scanOffset + 32768)).arrayBuffer();
       mp3Buffer = new Uint8Array(extraChunk);
       mp3View = new DataView(extraChunk);
       localOffset = 0;
@@ -926,23 +1073,23 @@ async function fastGetAudioDuration(file) {
     const BITRATES_MPEG1_L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
     const BITRATES_MPEG2_L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
     const SAMPLE_RATES = [
-      [11025, 12000, 8000],  // MPEG 2.5
+      [11025, 12000, 8000],
       null,
-      [22050, 24000, 16000], // MPEG 2
-      [44100, 48000, 32000]  // MPEG 1
+      [22050, 24000, 16000],
+      [44100, 48000, 32000]
     ];
 
     for (let i = localOffset; i <= mp3Buffer.length - 4; i++) {
-      if (mp3Buffer[i] === 0xFF && (mp3Buffer[i+1] & 0xE0) === 0xE0) {
-        const versionBits = (mp3Buffer[i+1] >> 3) & 0x03; // 3: V1, 2: V2, 0: V2.5
-        const layerBits = (mp3Buffer[i+1] >> 1) & 0x03;   // 1: L3, 2: L2, 3: L1
+      if (mp3Buffer[i] === 0xFF && (mp3Buffer[i + 1] & 0xE0) === 0xE0) {
+        const versionBits = (mp3Buffer[i + 1] >> 3) & 0x03;
+        const layerBits = (mp3Buffer[i + 1] >> 1) & 0x03;
         if (versionBits === 1 || layerBits === 0) continue;
 
-        const bitrateIdx = (mp3Buffer[i+2] >> 4) & 0x0F;
-        const sampleRateIdx = (mp3Buffer[i+2] >> 2) & 0x03;
+        const bitrateIdx = (mp3Buffer[i + 2] >> 4) & 0x0F;
+        const sampleRateIdx = (mp3Buffer[i + 2] >> 2) & 0x03;
         if (bitrateIdx === 0x0F || bitrateIdx === 0 || sampleRateIdx === 3) continue;
 
-        const channelMode = (mp3Buffer[i+3] >> 6) & 0x03;
+        const channelMode = (mp3Buffer[i + 3] >> 6) & 0x03;
         const sampleRate = SAMPLE_RATES[versionBits] ? SAMPLE_RATES[versionBits][sampleRateIdx] : 44100;
         let bitrate = 0;
         if (layerBits === 1) {
@@ -952,14 +1099,13 @@ async function fastGetAudioDuration(file) {
         }
         if (!bitrate || !sampleRate) continue;
 
-        // Check for Xing / Info header (VBR frame count)
         const xingOffset = i + (versionBits === 3 ? (channelMode === 3 ? 21 : 36) : (channelMode === 3 ? 13 : 21));
         if (xingOffset + 12 <= mp3Buffer.length) {
-          const isXing = (mp3Buffer[xingOffset] === 0x58 && mp3Buffer[xingOffset+1] === 0x69 && mp3Buffer[xingOffset+2] === 0x6E && mp3Buffer[xingOffset+3] === 0x67) ||
-                         (mp3Buffer[xingOffset] === 0x49 && mp3Buffer[xingOffset+1] === 0x6E && mp3Buffer[xingOffset+2] === 0x66 && mp3Buffer[xingOffset+3] === 0x6F);
+          const isXing = (mp3Buffer[xingOffset] === 0x58 && mp3Buffer[xingOffset + 1] === 0x69 && mp3Buffer[xingOffset + 2] === 0x6E && mp3Buffer[xingOffset + 3] === 0x67) ||
+                         (mp3Buffer[xingOffset] === 0x49 && mp3Buffer[xingOffset + 1] === 0x6E && mp3Buffer[xingOffset + 2] === 0x66 && mp3Buffer[xingOffset + 3] === 0x6F);
           if (isXing) {
             const flags = mp3View.getUint32(xingOffset + 4, false);
-            if (flags & 0x01) { // frames field present
+            if (flags & 0x01) {
               const frames = mp3View.getUint32(xingOffset + 8, false);
               const samplesPerFrame = layerBits === 3 ? 384 : (versionBits === 3 ? 1152 : 576);
               if (frames > 0 && sampleRate > 0) {
@@ -969,7 +1115,6 @@ async function fastGetAudioDuration(file) {
           }
         }
 
-        // Constant Bitrate (CBR) calculation
         const audioDataSize = Math.max(1, file.size - (id3Size || 0));
         return Math.max(1, Math.round((audioDataSize * 8) / (bitrate * 1000)));
       }
@@ -978,13 +1123,12 @@ async function fastGetAudioDuration(file) {
     console.warn('Fast duration parse error:', e);
   }
 
-  // Fallback estimation based on size (~160kbps standard audio bitrate)
   if (file.size > 0) {
     return Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
   }
-
   return 0;
 }
+
 
 /**
  * FAST ULTRA-RELIABLE audio import engine.
@@ -1107,10 +1251,12 @@ async function handleAudioFiles(files) {
   }
 
   hideScanProgress(newSongs.length, total);
-  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét nhạc';
+  if (scanMusicBtnText) scanMusicBtnText.textContent = 'Quét';
   if (scanMusicIcon) scanMusicIcon.classList.remove('animate-spin');
 
-  showToast(`🎉 Đã nạp siêu tốc ${newSongs.length} bài hát! Tổng: ${state.songs.length} bài`, '🎵');
+  showToast(`🎉 Đã nạp ${newSongs.length} bài hát! Tổng: ${state.songs.length} bài`, '🎵');
+  // Correct list durations in background (metadata is ground truth for real files)
+  repairDurationsInBackground(newSongs).catch(() => {});
 }
 
 /**
@@ -1121,13 +1267,15 @@ function enrichCurrentSongID3(song) {
   if (!song || song._enriched || !song.audioBlob) return;
   song._enriched = true;
 
-  // If duration is missing, resolve it via fast header parser
-  if ((!song.duration || song.duration <= 0) && song.audioBlob) {
-    fastGetAudioDuration(song.audioBlob).then(dur => {
+  // Verify duration via audio element (most accurate for real files)
+  if (!song._durationVerified && (song.audioBlob || song.audioUrl)) {
+    probeDurationWithAudio(song.audioBlob || song.audioUrl).then(dur => {
+      song._durationVerified = true;
       if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
         song.duration = dur;
         dbAddSong(song).catch(() => {});
-        renderTrackList();
+        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+        if (mono) mono.textContent = formatTime(dur, '--:--');
       }
     }).catch(() => {});
   }
@@ -1397,77 +1545,103 @@ miniPlayerCard.addEventListener('touchend', (e) => {
   }
 }, { passive: true });
 
-// Swipe down anywhere on Full Player to dismiss (Interactive Pull-Down)
+// Swipe-down dismiss — prioritize header / grab zone (was blocked by touch-action: pan-x)
 let fpTouchStartY = 0;
 let fpTouchStartX = 0;
 let fpIsDragging = false;
 let fpMoved = false;
 
-fullPlayer.addEventListener('touchstart', (e) => {
-  // Ignore touches on seekbar, volume slider, buttons, or photo picker badge
-  if (e.target.closest('input[type="range"]') || 
-      e.target.closest('#bigPlayBtn') || 
-      e.target.closest('#nextBtn') || 
-      e.target.closest('#prevBtn') || 
-      e.target.closest('#shuffleBtn') || 
-      e.target.closest('#repeatBtn') || 
-      e.target.closest('#favoriteBtn') || 
-      e.target.closest('#openQueueBtn') ||
-      e.target.closest('#changeCoverBadgeBtn')) {
+function fpShouldIgnoreTarget(target) {
+  return !!(target.closest && (
+    target.closest('input[type="range"]') ||
+    target.closest('#bigPlayBtn') ||
+    target.closest('#nextBtn') ||
+    target.closest('#prevBtn') ||
+    target.closest('#shuffleBtn') ||
+    target.closest('#repeatBtn') ||
+    target.closest('#favoriteBtn') ||
+    target.closest('#openQueueBtn') ||
+    target.closest('#closeFullPlayerBtn') ||
+    target.closest('#changeCoverBadgeBtn') ||
+    target.closest('#artworkContainerBtn')
+  ));
+}
+
+function fpOnStart(clientX, clientY, target) {
+  if (fpShouldIgnoreTarget(target) && !target.closest('#fullPlayerHeader')) {
+    fpIsDragging = false;
+    return;
+  }
+  // Always allow drag from header / grab zone
+  const inHeader = !!(target.closest && target.closest('#fullPlayerHeader'));
+  if (!inHeader && fpShouldIgnoreTarget(target)) {
     fpIsDragging = false;
     return;
   }
   fpIsDragging = true;
   fpMoved = false;
-  fpTouchStartY = e.touches[0].clientY;
-  fpTouchStartX = e.touches[0].clientX;
-}, { passive: true });
+  fpTouchStartY = clientY;
+  fpTouchStartX = clientX;
+}
 
-fullPlayer.addEventListener('touchmove', (e) => {
+function fpOnMove(clientX, clientY, e) {
   if (!fpIsDragging) return;
-  const currentY = e.touches[0].clientY;
-  const currentX = e.touches[0].clientX;
-  const deltaY = currentY - fpTouchStartY;
-  const deltaX = Math.abs(currentX - fpTouchStartX);
-
-  // If dragging downward and vertical movement dominates
-  if (deltaY > 8 && deltaY > deltaX) {
+  const deltaY = clientY - fpTouchStartY;
+  const deltaX = Math.abs(clientX - fpTouchStartX);
+  if (deltaY > 6 && deltaY > deltaX) {
     fpMoved = true;
-    if (e.cancelable) e.preventDefault();
+    if (e && e.cancelable) e.preventDefault();
     fullPlayer.style.transition = 'none';
     fullPlayer.style.transform = `translateY(${deltaY}px)`;
+    fullPlayer.style.opacity = String(Math.max(0.35, 1 - deltaY / 500));
   }
-}, { passive: false });
+}
 
-fullPlayer.addEventListener('touchend', (e) => {
+function fpOnEnd(clientX, clientY) {
   if (!fpIsDragging) return;
   fpIsDragging = false;
-  const touchEndY = e.changedTouches[0].clientY;
-  const touchEndX = e.changedTouches[0].clientX;
-  const deltaY = touchEndY - fpTouchStartY;
-  const deltaX = Math.abs(touchEndX - fpTouchStartX);
+  const deltaY = clientY - fpTouchStartY;
+  const deltaX = Math.abs(clientX - fpTouchStartX);
 
-  if (fpMoved && deltaY > 60 && deltaY > deltaX) {
-    // Silky smooth slide out to dismiss
+  if (fpMoved && deltaY > 50 && deltaY > deltaX) {
     fullPlayer.style.transition = 'transform 0.28s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.25s ease';
     fullPlayer.style.transform = 'translateY(105%)';
+    fullPlayer.style.opacity = '0';
     setTimeout(() => {
       closeFullPlayer();
       fullPlayer.style.transform = '';
       fullPlayer.style.transition = '';
+      fullPlayer.style.opacity = '';
     }, 280);
   } else if (fpMoved) {
-    // Snap back smoothly up to 0%
-    fullPlayer.style.transition = 'transform 0.24s cubic-bezier(0.25, 1, 0.5, 1)';
+    fullPlayer.style.transition = 'transform 0.24s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.2s ease';
     fullPlayer.style.transform = 'translateY(0%)';
+    fullPlayer.style.opacity = '1';
     setTimeout(() => {
       fullPlayer.style.transform = '';
       fullPlayer.style.transition = '';
+      fullPlayer.style.opacity = '';
     }, 240);
   }
+}
+
+fullPlayer.addEventListener('touchstart', (e) => {
+  fpOnStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
+}, { passive: true });
+
+fullPlayer.addEventListener('touchmove', (e) => {
+  fpOnMove(e.touches[0].clientX, e.touches[0].clientY, e);
+}, { passive: false });
+
+fullPlayer.addEventListener('touchend', (e) => {
+  fpOnEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
 }, { passive: true });
 
 if (fullPlayerHeader) {
+  fullPlayerHeader.addEventListener('touchstart', (e) => {
+    fpOnStart(e.touches[0].clientX, e.touches[0].clientY, fullPlayerHeader);
+  }, { passive: true });
+
   fullPlayerHeader.addEventListener('click', (e) => {
     if (!e.target.closest('button') && !fpMoved) {
       closeFullPlayer();
@@ -1476,6 +1650,9 @@ if (fullPlayerHeader) {
 }
 
 function openFullPlayer() {
+  fullPlayer.style.transform = '';
+  fullPlayer.style.transition = '';
+  fullPlayer.style.opacity = '';
   fullPlayer.classList.remove('hidden-player');
   fullPlayer.classList.add('visible-player');
 }
@@ -1483,6 +1660,9 @@ function openFullPlayer() {
 function closeFullPlayer() {
   fullPlayer.classList.remove('visible-player');
   fullPlayer.classList.add('hidden-player');
+  fullPlayer.style.transform = '';
+  fullPlayer.style.transition = '';
+  fullPlayer.style.opacity = '';
 }
 
 function showToast(msg, icon = '✨') {
@@ -1513,7 +1693,8 @@ function escapeHtml(text) {
 // Native Android MediaStore Audio Scanner (Automatic Zero-Prompt 371+ Song Detection)
 async function scanAllAudioNative() {
   if (!window.Capacitor || !window.Capacitor.Plugins || !window.Capacitor.Plugins.MediaStoreScanner) {
-    if (scanAudioInput) scanAudioInput.click();
+    // Stay on-device: folder scan instead of cloud-capable file picker
+    if (scanFolderInput) scanFolderInput.click();
     return;
   }
 
@@ -1617,58 +1798,47 @@ async function handleNativeSongs(nativeList) {
 // 11. EVENT HANDLERS & BINDINGS
 // ==========================================
 function setupEventHandlers() {
-  // Comprehensive Audio Scanner (Auto MediaStore on APK, File Picker on PWA)
-  function triggerAudioScan() {
+  /**
+   * Auto local-storage scan only (no cloud / Google picker).
+   * APK → MediaStore; Web/PWA → chọn thư mục bộ nhớ máy (đệ quy local).
+   */
+  async function triggerLocalStorageScan() {
     if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
       scanAllAudioNative();
-    } else if (scanAudioInput) {
-      scanAudioInput.click();
+      return;
     }
-  }
-
-  // Recursive Folder Scanner (Scans all subfolders for 371+ songs)
-  async function triggerFolderScan() {
     if ('showDirectoryPicker' in window) {
       try {
         const dirHandle = await window.showDirectoryPicker();
-        showToast('⚡ Đang quét đệ quy thư mục tìm toàn bộ bài hát...', '⏳');
+        showToast('⚡ Đang quét bộ nhớ máy...', '⏳');
         const files = await scanDirectoryRecursively(dirHandle);
         if (files.length > 0) {
           handleAudioFiles(files);
         } else {
-          showToast('Không tìm thấy file âm thanh nào trong thư mục này', '⚠️');
+          showToast('Không tìm thấy file âm thanh trong thư mục này', '⚠️');
         }
         return;
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn('showDirectoryPicker fallback to input:', err);
+        console.warn('showDirectoryPicker fallback:', err);
       }
     }
+    // Fallback: webkitdirectory (still local device storage, not cloud)
     if (scanFolderInput) scanFolderInput.click();
   }
 
-  // Free Folder / File Picker (Browse any folder freely)
   function triggerFreeFilePicker() {
     if (freeFileInput) freeFileInput.click();
   }
 
-  if (scanMusicBtn) scanMusicBtn.addEventListener('click', () => triggerAudioScan());
-  if (emptyStateScanBtn) emptyStateScanBtn.addEventListener('click', () => triggerAudioScan());
-  if (emptyStateScanFolderBtn) emptyStateScanFolderBtn.addEventListener('click', () => triggerFolderScan());
+  if (scanMusicBtn) scanMusicBtn.addEventListener('click', () => triggerLocalStorageScan());
+  if (emptyStateScanBtn) emptyStateScanBtn.addEventListener('click', () => triggerLocalStorageScan());
 
   if (modalScanAudioBtn) {
     modalScanAudioBtn.addEventListener('click', () => {
       optionsModal.classList.add('hidden');
       optionsModal.classList.remove('flex');
-      triggerAudioScan();
-    });
-  }
-
-  if (modalScanFolderBtn) {
-    modalScanFolderBtn.addEventListener('click', () => {
-      optionsModal.classList.add('hidden');
-      optionsModal.classList.remove('flex');
-      triggerFolderScan();
+      triggerLocalStorageScan();
     });
   }
 
@@ -1927,14 +2097,6 @@ function setupEventHandlers() {
     });
   }
 
-  if (modalChangeCoverBtn) {
-    modalChangeCoverBtn.addEventListener('click', () => {
-      optionsModal.classList.add('hidden');
-      optionsModal.classList.remove('flex');
-      triggerChangeCover();
-    });
-  }
-
   // Favorite button
   favoriteBtn.addEventListener('click', () => {
     const isFav = favHeartIcon.classList.contains('fill-pink-500');
@@ -1992,12 +2154,128 @@ function setupEventHandlers() {
 }
 
 // ==========================================
-// 12. INITIALIZATION
+// 12. DEMO SEED (UI preview on phone / desktop)
+// Open with ?demo=1  — or ?demo=1&reset=1 to wipe & reseed
+// ==========================================
+function createSilentWavBlob(durationSec = 40, sampleRate = 8000) {
+  const numSamples = Math.max(1, Math.floor(durationSec * sampleRate));
+  const dataSize = numSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function createDemoCoverBlob(colorA, colorB, label) {
+  const size = 320;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, colorA);
+  grad.addColorStop(1, colorB);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(255,255,255,0.14)';
+  ctx.beginPath();
+  ctx.arc(size * 0.78, size * 0.22, size * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  ctx.font = '700 72px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText((label || '?').slice(0, 1).toUpperCase(), size / 2, size / 2 + 4);
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob || null), 'image/jpeg', 0.88);
+  });
+}
+
+async function seedDemoLibrary({ force = false } = {}) {
+  const demoCatalog = [
+    { title: 'Đêm Hà Nội', artist: 'Sơn Tùng Demo', album: 'Demo Night', colors: ['#1a3a5c', '#e85d75'], duration: 198 },
+    { title: 'Ocean Drive', artist: 'Lofi Coast', album: 'Sunset EP', colors: ['#0b3d4a', '#2dd4bf'], duration: 224 },
+    { title: 'Nhịp Tim Chậm', artist: 'Indie Violet', album: 'Soft Pulse', colors: ['#3b1d5c', '#c084fc'], duration: 186 },
+    { title: 'City Lights', artist: 'Neon Avenue', album: 'After Hours', colors: ['#1e1b4b', '#f472b6'], duration: 211 },
+    { title: 'Cà Phê Sáng', artist: 'Acoustic Bean', album: 'Morning', colors: ['#4a2c0a', '#f59e0b'], duration: 172 },
+    { title: 'Rainy Window', artist: 'Chill Room', album: 'Grey Skies', colors: ['#1f2937', '#60a5fa'], duration: 240 },
+    { title: 'Bước Chân Nhẹ', artist: 'Folk Lane', album: 'Home', colors: ['#14532d', '#86efac'], duration: 195 },
+    { title: 'Midnight Run', artist: 'Bassline', album: 'Night Shift', colors: ['#111827', '#ef4444'], duration: 203 },
+    { title: 'Gió Biển', artist: 'Wave Kids', album: 'Coastal', colors: ['#0c4a6e', '#38bdf8'], duration: 218 },
+    { title: 'Starlight Loop', artist: 'MM Drive Demo', album: 'Preview Pack', colors: ['#312e81', '#a78bfa'], duration: 187 }
+  ];
+
+  if (force) {
+    await dbClearAll();
+    state.songs = [];
+    state.queue = [];
+    state.currentIndex = -1;
+  }
+
+  const alreadyHasDemo = state.songs.some(s => s.isDemo || (s.id && String(s.id).startsWith('demo_')));
+  if (!force && (state.songs.length > 0 || alreadyHasDemo)) {
+    return false;
+  }
+
+  const baseTs = Date.now();
+  const newSongs = [];
+  // Tiny silent clip only — UI duration comes from metadata (keeps IndexedDB light)
+  const sharedSilent = createSilentWavBlob(8);
+
+  for (let i = 0; i < demoCatalog.length; i++) {
+    const item = demoCatalog[i];
+    const coverBlob = await createDemoCoverBlob(item.colors[0], item.colors[1], item.title);
+    const audioUrl = URL.createObjectURL(sharedSilent);
+    const coverUrl = coverBlob ? URL.createObjectURL(coverBlob) : 'logo.png';
+
+    newSongs.push({
+      id: 'demo_' + (i + 1) + '_' + baseTs,
+      title: item.title,
+      artist: item.artist,
+      album: item.album,
+      duration: item.duration,
+      audioBlob: sharedSilent,
+      audioUrl,
+      coverBlob,
+      coverUrl,
+      fileName: item.title + '.wav',
+      fileSize: Math.round(item.duration * 16000),
+      addedAt: baseTs + (demoCatalog.length - i) * 10,
+      isDemo: true
+    });
+  }
+
+  await dbAddSongsBatch(newSongs);
+  state.songs = [...newSongs, ...state.songs];
+  state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  return true;
+}
+
+// ==========================================
+// 13. INITIALIZATION
 // ==========================================
 async function initApp() {
   try {
     await initDB();
     const storedSongs = await dbGetAllSongs();
+    const urlParams = new URLSearchParams(window.location.search);
+    const demoMode = urlParams.get('demo') === '1' || urlParams.get('demo') === 'true';
+    const demoReset = urlParams.get('reset') === '1';
 
     // Reconstruct audio URLs and cover URLs from stored Blobs or Native device paths
     let hasUpdatedDurations = false;
@@ -2030,7 +2308,6 @@ async function initApp() {
       };
     });
 
-    // Save repaired durations back into IndexedDB so all existing 371 songs are permanently fixed
     if (hasUpdatedDurations) {
       dbAddSongsBatch(state.songs).catch(() => {});
     }
@@ -2038,10 +2315,24 @@ async function initApp() {
     // Sắp xếp bài mới nạp lên trước, bài cũ sau
     state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
 
+    // Seed demo BEFORE first paint so phone preview never flashes empty state
+    if (demoMode) {
+      await seedDemoLibrary({ force: demoReset || state.songs.length === 0 });
+    }
+
     rebuildQueue(false);
     renderTrackList();
     updateLibraryBadges();
     setupEventHandlers();
+
+    if (demoMode && state.songs.some(s => s.isDemo)) {
+      showToast('Đã nạp ' + state.songs.filter(s => s.isDemo).length + ' bài demo để xem UI', '✨');
+    }
+
+    // Fix wrong durations for previously imported real tracks
+    if (!demoMode && state.songs.length > 0) {
+      repairDurationsInBackground(state.songs).catch(() => {});
+    }
 
     if (state.songs.length > 0) {
       state.currentIndex = 0;

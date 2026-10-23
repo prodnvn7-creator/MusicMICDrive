@@ -207,12 +207,43 @@ html, body {
   100% { transform: scaleY(1); }
 }
 
+/* Phone header: keep brand + actions from squashing */
+.app-header-row {
+  min-width: 0;
+}
+
+@media (max-width: 380px) {
+  .header-action-label {
+    display: none;
+  }
+  .header-action-btn {
+    width: 2rem;
+    height: 2rem;
+    padding: 0 !important;
+    justify-content: center;
+  }
+  .app-title {
+    font-size: 0.95rem;
+  }
+}
+
+.fp-drag-zone {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.touch-none {
+  touch-action: none;
+}
+
 /* Full Screen Player Transition */
 #fullPlayer {
   transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease;
   will-change: transform, opacity;
   overscroll-behavior: none;
-  touch-action: pan-x;
+  /* Allow custom vertical swipe-to-dismiss (was pan-x — blocked pull-down) */
+  touch-action: none;
 }
 
 #fullPlayer.hidden-player {
