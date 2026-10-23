@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 26;
+const APP_BUILD = 27;
 
 const state = {
   db: null,
@@ -28,7 +28,13 @@ const state = {
   isDraggingSeek: false,
   searchQuery: '',
   nextPreloadedId: null,
-  nativeScanBusy: false
+  nativeScanBusy: false,
+  _songMap: null,
+  _uiTickAt: 0,
+  _posTickAt: 0,
+  _refinedSongId: null,
+  _meshUrl: null,
+  _mediaHandlersBound: false
 };
 
 const nativeRefreshGate = {
@@ -312,7 +318,12 @@ function extractColorsFromImage(imgUrl) {
 }
 
 async function updateDynamicMesh(imgUrl) {
+  // Skip when backgrounded or same cover — saves CPU / heat
+  if (document.hidden) return;
+  if (!imgUrl || imgUrl === state._meshUrl) return;
+  state._meshUrl = imgUrl;
   const palette = await extractColorsFromImage(imgUrl);
+  if (document.hidden) return;
   const root = document.documentElement;
   if (palette) {
     root.style.setProperty('--c1', palette.c1);
@@ -321,7 +332,6 @@ async function updateDynamicMesh(imgUrl) {
     root.style.setProperty('--c4', palette.c4);
     root.style.setProperty('--glow-rgb', palette.glow);
   } else {
-    // Default Music MIC Driver tones matching Image 2
     root.style.setProperty('--c1', '#38bdf8');
     root.style.setProperty('--c2', '#2563eb');
     root.style.setProperty('--c3', '#06b6d4');
@@ -342,8 +352,15 @@ function fisherYatesShuffle(array) {
   return copy;
 }
 
+function invalidateSongMap() {
+  state._songMap = null;
+}
+
 function songById(id) {
-  return state.songs.find(s => s.id === id) || null;
+  if (!state._songMap) {
+    state._songMap = new Map(state.songs.map((s) => [s.id, s]));
+  }
+  return state._songMap.get(id) || null;
 }
 
 /** Energy / tempo feel 0–100 (proxy BPM when real analysis unavailable) */
@@ -442,7 +459,7 @@ function refineUpcomingSeamless(currentSong, depth = 4) {
     const slot = (state.currentIndex + d) % state.queue.length;
     let bestIdx = slot;
     let bestScore = songAffinity(anchor, songById(state.queue[slot]));
-    const searchTo = Math.min(state.queue.length - 1, d + (state.isShuffle ? 14 : 6));
+    const searchTo = Math.min(state.queue.length - 1, d + (state.isShuffle ? 8 : 5));
     for (let off = d; off <= searchTo; off++) {
       const idx = (state.currentIndex + off) % state.queue.length;
       const score = songAffinity(anchor, songById(state.queue[idx]));
@@ -462,14 +479,17 @@ function refineUpcomingSeamless(currentSong, depth = 4) {
 
 function promoteCompatibleNext(currentSong) {
   if (!currentSong || state.queue.length < 3 || state.repeatMode === 'one') return;
+  // Once per track near the end — avoid re-scoring on every timeupdate
+  if (state._refinedSongId === currentSong.id) return;
+  state._refinedSongId = currentSong.id;
   if (state.isShuffle) {
-    refineUpcomingSeamless(currentSong, 5);
+    refineUpcomingSeamless(currentSong, 3);
     return;
   }
   const nextIdx = (state.currentIndex + 1) % state.queue.length;
   let bestIdx = nextIdx;
   let bestScore = songAffinity(currentSong, songById(state.queue[nextIdx]));
-  const windowSize = Math.min(8, state.queue.length - 1);
+  const windowSize = Math.min(6, state.queue.length - 1);
   for (let off = 2; off <= windowSize; off++) {
     const idx = (state.currentIndex + off) % state.queue.length;
     const score = songAffinity(currentSong, songById(state.queue[idx]));
@@ -640,9 +660,9 @@ async function directPlaybackTransition(song) {
   activeDeck.src = song.audioUrl;
   activeDeck.volume = state.masterVolume;
 
+  state._refinedSongId = null;
   updateUIWithSong(song);
   updateMediaSession(song);
-  renderTrackList();
 
   try {
     await activeDeck.play();
@@ -686,14 +706,13 @@ function performMashupTransition(nextSong, duration = 5.0, fromSong = null) {
 
   updateUIWithSong(nextSong);
   updateMediaSession(nextSong);
-  renderTrackList();
 
   targetDeck.play().then(() => {
     activeDeck = targetDeck;
     inactiveDeck = currentDeck;
 
-    const intervalTime = 24; // denser steps = smoother ghost fade
-    const steps = Math.max(28, Math.round((duration * 1000) / intervalTime));
+    const intervalTime = 50; // ~20fps fade — smooth enough, far less CPU/heat
+    const steps = Math.max(20, Math.round((duration * 1000) / intervalTime));
     let stepCount = 0;
 
     if (state.fadeInterval) clearInterval(state.fadeInterval);
@@ -713,7 +732,8 @@ function performMashupTransition(nextSong, duration = 5.0, fromSong = null) {
         clearInterval(state.fadeInterval);
         state.fadeInterval = null;
         inactiveDeck.pause();
-        inactiveDeck.currentTime = 0;
+        inactiveDeck.removeAttribute('src');
+        try { inactiveDeck.load(); } catch (e) {}
         inactiveDeck.volume = state.masterVolume;
         activeDeck.volume = state.masterVolume;
         state.isCrossfading = false;
@@ -807,9 +827,11 @@ function setupDeckEvents(deck) {
 
     const cur = deck.currentTime;
     const dur = deck.duration || 0;
+    const now = performance.now();
 
-    // Update scrubber when not user dragging
-    if (!state.isDraggingSeek && dur > 0) {
+    // Throttle scrubber DOM writes (~4/s → ~4/s max but skip extra work)
+    if (!state.isDraggingSeek && dur > 0 && now - state._uiTickAt >= 280) {
+      state._uiTickAt = now;
       const progressPercent = (cur / dur) * 100;
       seekBar.value = progressPercent;
       miniProgressBar.style.width = `${progressPercent}%`;
@@ -817,39 +839,44 @@ function setupDeckEvents(deck) {
       remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, dur - cur));
     }
 
-    // Seamless auto-mix near end — shuffle uses longer invisible blends + tempo chain
-    if (!state.isCrossfading && state.isPlaying && dur > 6) {
+    // Lockscreen position — once per second is enough
+    if (now - state._posTickAt >= 1000) {
+      state._posTickAt = now;
+      syncMediaSessionPositionState();
+    }
+
+    // Seamless auto-mix near end
+    if (!state.isCrossfading && state.isPlaying && dur > 6 && !document.hidden) {
       const timeLeft = dur - cur;
       const currentSong = getCurrentSong();
-      const preloadAt = state.isShuffle ? 18 : 14;
-      const blendAt = state.isShuffle ? 3.5 : 2.6;
+      const preloadAt = state.isShuffle ? 16 : 12;
+      const blendAt = state.isShuffle ? 3.2 : 2.4;
 
-      if (timeLeft <= preloadAt && timeLeft > blendAt + 0.4 && !document.hidden) {
-        if (state.isShuffle) promoteCompatibleNext(currentSong);
+      if (timeLeft <= preloadAt && timeLeft > blendAt + 0.5) {
+        promoteCompatibleNext(currentSong);
         const upcoming = getNextSong();
         if (upcoming && upcoming.audioUrl && state.nextPreloadedId !== upcoming.id) {
           try {
             inactiveDeck.src = upcoming.audioUrl;
+            inactiveDeck.preload = 'auto';
             inactiveDeck.load();
             state.nextPreloadedId = upcoming.id;
           } catch (e) {}
         }
       }
 
-      if (timeLeft <= blendAt && timeLeft > 0.2 && !document.hidden) {
+      if (timeLeft <= blendAt && timeLeft > 0.2) {
         promoteCompatibleNext(currentSong);
         const nextSong = getNextSong();
         if (nextSong) {
           state.currentIndex = (state.currentIndex + 1) % state.queue.length;
           state.nextPreloadedId = null;
+          state._refinedSongId = null;
           const blendLead = getSmartBlendDuration(currentSong, nextSong, timeLeft);
           performMashupTransition(nextSong, blendLead, currentSong);
         }
       }
     }
-
-    // Sync lockscreen position
-    syncMediaSessionPositionState();
   });
 
   // Track ended event (Seamless direct handoff for iOS background mode)
@@ -886,7 +913,8 @@ function setupDeckEvents(deck) {
       if (currentSong && (!currentSong.duration || Math.abs(currentSong.duration - deck.duration) > 1)) {
         currentSong.duration = deck.duration;
         dbAddSong(currentSong).catch(() => {});
-        renderTrackList();
+        const mono = document.querySelector(`.track-item[data-id="${currentSong.id}"] .font-mono`);
+        if (mono) mono.textContent = formatTime(deck.duration, '--:--');
       }
       if (currentTimeDisplay && remainingTimeDisplay) {
         currentTimeDisplay.textContent = formatTime(deck.currentTime || 0);
@@ -915,8 +943,9 @@ function setupDeckEvents(deck) {
 setupDeckEvents(deckA);
 setupDeckEvents(deckB);
 
-// Page Visibility — when APK returns to foreground, light-scan for newly downloaded tracks
+// Page Visibility — cut GPU work in background; APK light-scan on resume
 document.addEventListener('visibilitychange', () => {
+  document.body.classList.toggle('app-hidden', document.hidden);
   if (!document.hidden && isNativeApk()) {
     refreshNativeLibrarySilent();
   }
@@ -925,20 +954,9 @@ document.addEventListener('visibilitychange', () => {
 // ==========================================
 // 7. MEDIA SESSION API (IOS / ANDROID LOCKSCREEN)
 // ==========================================
-function updateMediaSession(song) {
-  if (!('mediaSession' in navigator) || !song) return;
-
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: song.title,
-    artist: song.artist,
-    album: song.album || 'Music MIC Driver',
-    artwork: [
-      { src: song.coverUrl, sizes: '96x96', type: 'image/png' },
-      { src: song.coverUrl, sizes: '192x192', type: 'image/png' },
-      { src: song.coverUrl, sizes: '512x512', type: 'image/png' }
-    ]
-  });
-
+function bindMediaSessionHandlersOnce() {
+  if (state._mediaHandlersBound || !('mediaSession' in navigator)) return;
+  state._mediaHandlersBound = true;
   navigator.mediaSession.setActionHandler('play', () => togglePlayPause());
   navigator.mediaSession.setActionHandler('pause', () => togglePlayPause());
   navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
@@ -954,9 +972,27 @@ function updateMediaSession(song) {
   });
   navigator.mediaSession.setActionHandler('seekforward', (details) => {
     const skipTime = details.seekOffset || 10;
-    activeDeck.currentTime = Math.min(activeDeck.currentTime + skipTime, activeDeck.duration);
+    if (activeDeck.duration) {
+      activeDeck.currentTime = Math.min(activeDeck.currentTime + skipTime, activeDeck.duration);
+    }
+  });
+}
+
+function updateMediaSession(song) {
+  if (!('mediaSession' in navigator) || !song) return;
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: song.title,
+    artist: song.artist,
+    album: song.album || 'Music MIC Driver',
+    artwork: [
+      { src: song.coverUrl || 'logo.png', sizes: '96x96', type: 'image/png' },
+      { src: song.coverUrl || 'logo.png', sizes: '192x192', type: 'image/png' },
+      { src: song.coverUrl || 'logo.png', sizes: '512x512', type: 'image/png' }
+    ]
   });
 
+  bindMediaSessionHandlersOnce();
   updateMediaSessionPlaybackState();
 }
 
@@ -1161,7 +1197,7 @@ function probeDurationWithAudio(src) {
       }
       resolve(val > 0 && Number.isFinite(val) ? Math.round(val) : 0);
     };
-    const timer = setTimeout(() => finish(0), 10000);
+    const timer = setTimeout(() => finish(0), 4000);
     audio.addEventListener('loadedmetadata', () => finish(audio.duration));
     audio.addEventListener('error', () => finish(0));
     try {
@@ -1178,33 +1214,35 @@ function probeDurationWithAudio(src) {
 }
 
 async function repairDurationsInBackground(songs) {
-  const list = (songs || []).filter(s => s && (s.audioBlob || s.audioUrl) && !s.isDemo);
+  // Only probe tracks with missing/bogus duration — full-library decode heats the phone
+  const list = (songs || []).filter((s) =>
+    s && !s.isDemo && !s._durationVerified && (s.audioBlob || s.audioUrl) && !(s.duration > 1)
+  );
   if (list.length === 0) return;
-  let cursor = 0;
-  const workers = 2;
 
-  async function worker() {
-    while (cursor < list.length) {
-      const song = list[cursor++];
-      if (!song || song._durationVerified) continue;
-      const src = song.audioBlob || song.audioUrl;
-      const dur = await probeDurationWithAudio(src);
-      song._durationVerified = true;
-      if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
-        song.duration = dur;
-        try { await dbAddSong(song); } catch (e) {}
-        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
-        if (mono) mono.textContent = formatTime(dur, '--:--');
-        const current = getCurrentSong();
-        if (current && current.id === song.id && remainingTimeDisplay) {
-          const left = Math.max(0, dur - (activeDeck.currentTime || 0));
-          remainingTimeDisplay.textContent = '-' + formatTime(left);
-        }
+  for (let i = 0; i < list.length; i++) {
+    while (document.hidden) {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    const song = list[i];
+    if (!song || song._durationVerified) continue;
+    const src = song.audioBlob || song.audioUrl;
+    const dur = await probeDurationWithAudio(src);
+    song._durationVerified = true;
+    if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
+      song.duration = dur;
+      try { await dbAddSong(song); } catch (e) {}
+      const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+      if (mono) mono.textContent = formatTime(dur, '--:--');
+      const current = getCurrentSong();
+      if (current && current.id === song.id && remainingTimeDisplay) {
+        const left = Math.max(0, dur - (activeDeck.currentTime || 0));
+        remainingTimeDisplay.textContent = '-' + formatTime(left);
       }
     }
+    // Yield so UI / audio stay responsive
+    if (i % 2 === 1) await new Promise((r) => setTimeout(r, 120));
   }
-
-  await Promise.all(Array.from({ length: workers }, () => worker()));
 }
 
 /**
@@ -1453,6 +1491,7 @@ async function handleAudioFiles(files) {
     ...state.songs.filter(s => !newSongs.some(ns => ns.id === s.id))
   ];
   state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  invalidateSongMap();
   rebuildQueue(true);
   renderTrackList();
   updateLibraryBadges();
@@ -2262,6 +2301,7 @@ async function handleNativeSongs(nativeList, options = {}) {
     ...newSongs,
     ...state.songs.filter(s => !newIds.has(s.id))
   ];
+  invalidateSongMap();
 
   rebuildQueue(true);
   renderTrackList();
@@ -2461,6 +2501,7 @@ function setupEventHandlers() {
       if (confirm('Bạn có chắc muốn xóa bài hát này khỏi máy?')) {
         await dbDeleteSong(id);
         state.songs = state.songs.filter(s => s.id !== id);
+        invalidateSongMap();
         rebuildQueue(true);
         renderTrackList();
         updateLibraryBadges();
@@ -2645,6 +2686,7 @@ function setupEventHandlers() {
     if (confirm('Bạn có chắc muốn xóa TẤT CẢ bài hát trong thư viện? Hành động này không thể hoàn tác.')) {
       await dbClearAll();
       state.songs = [];
+      invalidateSongMap();
       state.queue = [];
       state.currentIndex = -1;
       activeDeck.pause();
@@ -2729,6 +2771,7 @@ async function seedDemoLibrary({ force = false } = {}) {
   if (force) {
     await dbClearAll();
     state.songs = [];
+    invalidateSongMap();
     state.queue = [];
     state.currentIndex = -1;
   }
@@ -2769,6 +2812,7 @@ async function seedDemoLibrary({ force = false } = {}) {
   await dbAddSongsBatch(newSongs);
   state.songs = [...newSongs, ...state.songs];
   state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  invalidateSongMap();
   return true;
 }
 
@@ -2857,8 +2901,10 @@ function setupPwaAutoUpdate() {
   });
   window.addEventListener('focus', checkSwUpdate);
   window.addEventListener('pageshow', checkSwUpdate);
-  // Catch updates while the installed app stays open
-  setInterval(checkSwUpdate, 45000);
+  // Light update ping while installed app stays open (only when visible)
+  setInterval(() => {
+    if (!document.hidden) checkSwUpdate();
+  }, 120000);
 }
 
 async function initApp() {
@@ -2906,6 +2952,7 @@ async function initApp() {
 
     // Sắp xếp bài mới nạp lên trước, bài cũ sau
     state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    invalidateSongMap();
 
     // Seed demo BEFORE first paint so phone preview never flashes empty state
     if (demoMode) {

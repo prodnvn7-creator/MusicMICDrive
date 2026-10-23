@@ -20,7 +20,7 @@
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css?v=26">
+  <link rel="stylesheet" href="style.css?v=27">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -208,7 +208,7 @@
     
     <!-- Dynamic Full Player Blur Backdrop (fades out on swipe so library shows through) -->
     <div id="fullPlayerBg" class="absolute inset-0 -z-10 overflow-hidden bg-[#0a0a0f]">
-      <div id="fullPlayerBackdropBlur" class="absolute inset-0 bg-cover bg-center filter blur-3xl opacity-50 scale-125 transition-all duration-1000" style="background-image: url('logo.png');"></div>
+      <div id="fullPlayerBackdropBlur" class="absolute inset-0 bg-cover bg-center filter blur-xl opacity-40 scale-110 transition-opacity duration-500" style="background-image: url('logo.png');"></div>
       <div id="fullPlayerBgVeil" class="absolute inset-0 bg-gradient-to-b from-black/50 via-black/30 to-black/85"></div>
     </div>
 
@@ -437,6 +437,6 @@
   <input type="file" id="freeFileInput" multiple accept="*/*" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=26"></script>
+  <script src="app.js?v=27"></script>
 </body>
 </html>

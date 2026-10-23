@@ -45,27 +45,27 @@ html, body {
     radial-gradient(circle at 15% 20%, var(--c1) 0%, transparent 60%),
     radial-gradient(circle at 85% 80%, var(--c2) 0%, transparent 60%),
     radial-gradient(circle at 75% 25%, var(--c3) 0%, transparent 50%);
-  opacity: 0.85;
-  transition: background-image 1.5s ease, background-color 1.5s ease;
-  transform: translateZ(0); /* Force GPU composite layer */
+  opacity: 0.75;
+  transition: background-color 0.5s ease;
+  transform: translateZ(0);
 }
 
 .mesh-blob, .mesh-overlay {
   display: none;
 }
 
-/* Glassmorphism Classes */
+/* Glassmorphism — lighter blur = cooler phone / less jank */
 .glass-panel {
-  background: rgba(28, 28, 34, 0.65);
-  backdrop-filter: blur(28px) saturate(190%);
-  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  background: rgba(22, 22, 28, 0.88);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .glass-pill {
-  background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
@@ -79,8 +79,7 @@ html, body {
 }
 
 .artwork-img {
-  transition: transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.45s ease;
-  will-change: transform, box-shadow;
+  transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.35s ease;
 }
 
 .artwork-playing {
@@ -207,6 +206,23 @@ html, body {
   100% { transform: scaleY(1); }
 }
 
+/* Backgrounded / battery: pause decorative GPU work */
+body.app-hidden .sound-wave-bar,
+body.app-hidden .scan-indeterminate-bar {
+  animation: none !important;
+}
+body.app-hidden .mesh-bg-container {
+  opacity: 0.35 !important;
+  transition: none !important;
+}
+body.app-hidden #fullPlayerBackdropBlur {
+  filter: none !important;
+  opacity: 0.2 !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sound-wave-bar { animation: none !important; }
+}
+
 /* Phone header: keep brand + actions from squashing */
 .app-header-row {
   min-width: 0;
@@ -246,7 +262,6 @@ html, body {
 /* Full Screen Player — GPU sheet drag (ghost scale + translate3d) */
 #fullPlayer {
   transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease, border-radius 0.35s ease;
-  will-change: transform;
   overscroll-behavior: none;
   touch-action: none;
   transform: translate3d(0, 0, 0);
