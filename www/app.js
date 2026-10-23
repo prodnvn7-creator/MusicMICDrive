@@ -2853,24 +2853,51 @@ async function initApp() {
       }
     }
 
-    // Register Service Worker for 100% Offline Capability & Auto-update
+    // Register Service Worker — force update for installed PWA / home-screen shortcut
     if ('serviceWorker' in navigator) {
+      let refreshing = false;
+      const reloadOnce = () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+      };
+
+      navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+
+      const checkSwUpdate = () => {
+        navigator.serviceWorker.getRegistration().then((reg) => {
+          if (reg) reg.update().catch(() => {});
+        });
+      };
+
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
           .then((reg) => {
             console.log('Service Worker Registered! Scope:', reg.scope);
-            reg.update();
+            reg.update().catch(() => {});
+            // If a waiting worker already exists (common on home-screen apps), activate it
+            if (reg.waiting) {
+              reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+            }
+            reg.addEventListener('updatefound', () => {
+              const neu = reg.installing;
+              if (!neu) return;
+              neu.addEventListener('statechange', () => {
+                if (neu.state === 'installed' && navigator.serviceWorker.controller) {
+                  reloadOnce();
+                }
+              });
+            });
           })
           .catch((err) => console.warn('Service Worker registration failed:', err));
-
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (!refreshing) {
-            refreshing = true;
-            window.location.reload();
-          }
-        });
       });
+
+      // Standalone shortcut often stays open — recheck when user returns
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') checkSwUpdate();
+      });
+      window.addEventListener('focus', checkSwUpdate);
+      window.addEventListener('pageshow', checkSwUpdate);
     }
 
   } catch (err) {

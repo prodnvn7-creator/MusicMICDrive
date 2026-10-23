@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mm-drive-cache-v24';
+const CACHE_NAME = 'mm-drive-cache-v25';
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -23,6 +23,12 @@ self.addEventListener('install', (event) => {
   );
 });
 
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
@@ -37,46 +43,59 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+function isAppShell(url, request) {
+  const path = url.pathname;
+  return (
+    request.mode === 'navigate' ||
+    path.endsWith('/') ||
+    path.endsWith('index.html') ||
+    path.endsWith('manifest.json') ||
+    path.endsWith('sw.js') ||
+    path.endsWith('app.js') ||
+    path.endsWith('style.css')
+  );
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Ignore blob:, data:, chrome-extension: schemes
   if (url.protocol.startsWith('blob') || url.protocol.startsWith('data') || !url.protocol.startsWith('http')) {
     return;
   }
 
-  // Network-First strategy for HTML and manifest to guarantee immediate updates
-  const isHtmlOrManifest = event.request.mode === 'navigate' || 
-                           url.pathname.endsWith('index.html') || 
-                           url.pathname.endsWith('manifest.json') ||
-                           url.pathname.endsWith('/');
-
-  if (isHtmlOrManifest) {
+  // App shell: network-first so installed PWA / home-screen shortcut gets updates
+  if (isAppShell(url, event.request)) {
     event.respondWith(
-      fetch(event.request).then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
-          const clone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return networkResponse;
-      }).catch(() => {
-        return caches.match('./index.html');
-      })
+      fetch(event.request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return networkResponse;
+        })
+        .catch(() => {
+          return caches.match(event.request).then((cached) => {
+            return cached || caches.match('./index.html');
+          });
+        })
     );
     return;
   }
 
-  // Stale-while-revalidate for assets
+  // Other assets: stale-while-revalidate
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
-      const fetchPromise = fetch(event.request).then((networkResponse) => {
-        if (networkResponse && networkResponse.status === 200) {
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, networkResponse.clone());
-          });
-        }
-        return networkResponse;
-      }).catch(() => {});
+      const fetchPromise = fetch(event.request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, networkResponse.clone());
+            });
+          }
+          return networkResponse;
+        })
+        .catch(() => cachedResponse);
 
       return cachedResponse || fetchPromise;
     })
