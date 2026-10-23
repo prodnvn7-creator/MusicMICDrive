@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "io.github.prodnvn7_creator.twa",
+    "sha256_cert_fingerprints": ["76:F8:DF:3A:C3:D2:68:14:C6:AC:7C:1E:26:56:AB:32:EA:92:EC:40:4C:48:8D:73:F0:23:5A:E6:09:E2:F8:18"]
+  }
+}]

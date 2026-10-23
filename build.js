@@ -18,7 +18,8 @@ const filesToCopy = [
   'icon-192.png',
   'icon-512.png',
   'apple-touch-icon.png',
-  'favicon.png'
+  'favicon.png',
+  '.nojekyll'
 ];
 
 filesToCopy.forEach(file => {
@@ -28,5 +29,18 @@ filesToCopy.forEach(file => {
     fs.copyFileSync(src, dest);
   }
 });
+
+// Copy .well-known folder
+const wellKnownDir = path.join(__dirname, '.well-known');
+const destWellKnownDir = path.join(outDir, '.well-known');
+if (fs.existsSync(wellKnownDir)) {
+  if (!fs.existsSync(destWellKnownDir)) {
+    fs.mkdirSync(destWellKnownDir, { recursive: true });
+  }
+  const wkFiles = fs.readdirSync(wellKnownDir);
+  wkFiles.forEach(f => {
+    fs.copyFileSync(path.join(wellKnownDir, f), path.join(destWellKnownDir, f));
+  });
+}
 
 console.log('✅ Assets successfully copied to www/ for Capacitor Android build!');
