@@ -161,6 +161,8 @@ html, body {
 /* Track item hover & active states */
 .track-item {
   transition: background-color 0.2s ease, transform 0.15s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 64px;
 }
 
 .track-item:active {
