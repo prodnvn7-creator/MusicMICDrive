@@ -268,33 +268,46 @@ html, body {
   visibility: visible;
 }
 
-/* During drag: strong ghost sheet over the library */
+/* During drag: solid plate dissolves so library playlist reads through */
 #fullPlayer.fp-dragging {
   --fp-ghost: 0;
   transition: none !important;
   will-change: transform, opacity;
+  background: transparent !important;
   box-shadow:
-    0 -16px 56px rgba(0, 0, 0, calc(0.55 * (1 - var(--fp-ghost, 0)))),
-    0 0 0 1px rgba(255, 255, 255, calc(0.12 + var(--fp-ghost, 0) * 0.18));
-  /* Frosted glass feel while fading */
-  -webkit-backdrop-filter: blur(calc(var(--fp-ghost, 0) * 10px));
-  backdrop-filter: blur(calc(var(--fp-ghost, 0) * 10px));
+    0 -12px 40px rgba(0, 0, 0, calc(0.35 * (1 - var(--fp-ghost, 0)))),
+    0 0 0 1px rgba(255, 255, 255, calc(0.1 + var(--fp-ghost, 0) * 0.2));
+}
+
+#fullPlayer.fp-dragging #fullPlayerBg {
+  transition: none !important;
+  /* Extra CSS fall-through if JS lag — plate opens with --fp-ghost */
+  opacity: calc(1 - var(--fp-ghost, 0) * 0.92) !important;
+  pointer-events: none;
+}
+
+#fullPlayer.fp-dragging #fullPlayerBgVeil {
+  transition: none !important;
+  opacity: calc(1 - var(--fp-ghost, 0)) !important;
 }
 
 #fullPlayer.fp-dragging #fullPlayerBackdropBlur {
   transition: none !important;
-  filter: blur(10px) !important;
+  filter: blur(8px) !important;
+  opacity: calc(0.5 * (1 - var(--fp-ghost, 0))) !important;
 }
 
 #fullPlayer.fp-dragging .artwork-img {
   transition: none !important;
-  opacity: calc(1 - (var(--fp-ghost, 0) * 0.55));
-  filter: saturate(calc(1 - var(--fp-ghost, 0) * 0.35));
+  opacity: calc(1 - (var(--fp-ghost, 0) * 0.35));
+  filter: saturate(calc(1 - var(--fp-ghost, 0) * 0.25));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, calc(0.45 * (1 - var(--fp-ghost, 0) * 0.6)));
 }
 
 #fullPlayer.fp-dragging #fpDragSurface,
 #fullPlayer.fp-dragging .px-7 {
-  opacity: calc(1 - (var(--fp-ghost, 0) * 0.2));
+  /* Keep controls visible; library peeks around artwork via transparent bg */
+  opacity: 1;
 }
 
 /* Spring snap-back */

@@ -115,6 +115,8 @@ const fullCover = document.getElementById('fullCover');
 const fullTitle = document.getElementById('fullTitle');
 const fullArtist = document.getElementById('fullArtist');
 const fullPlayerBackdropBlur = document.getElementById('fullPlayerBackdropBlur');
+const fullPlayerBg = document.getElementById('fullPlayerBg');
+const fullPlayerBgVeil = document.getElementById('fullPlayerBgVeil');
 const currentPlaylistTitle = document.getElementById('currentPlaylistTitle');
 const favoriteBtn = document.getElementById('favoriteBtn');
 const favHeartIcon = document.getElementById('favHeartIcon');
@@ -1770,7 +1772,13 @@ function fpClearInlineSheet() {
   fullPlayer.style.transform = '';
   fullPlayer.style.opacity = '';
   fullPlayer.style.borderRadius = '';
+  fullPlayer.style.background = '';
   if (fullPlayerBackdropBlur) fullPlayerBackdropBlur.style.opacity = '';
+  if (fullPlayerBg) {
+    fullPlayerBg.style.opacity = '';
+    fullPlayerBg.style.background = '';
+  }
+  if (fullPlayerBgVeil) fullPlayerBgVeil.style.opacity = '';
 }
 
 function fpResetDragVisual() {
@@ -1783,27 +1791,38 @@ function fpResetDragVisual() {
   fpClearInlineSheet();
 }
 
-/** 1:1 finger follow + strong ghost fade so library clearly shows through */
+/** 1:1 finger follow — kill solid backdrop so playlist under the sheet is obvious */
 function fpApplyPull(rawPull) {
   const h = window.innerHeight || 700;
   let y = Math.max(0, rawPull);
   const edge = h * 0.88;
   if (y > edge) y = edge + (y - edge) * 0.45;
 
-  // Reach full ghost sooner (~28% screen) so the fade is obvious
-  const progress = Math.min(1, y / (h * 0.28));
+  // Full ghost by ~18% of screen height (short pull = clear see-through)
+  const progress = Math.min(1, y / (h * 0.18));
   const ease = progress * progress * (3 - 2 * progress); // smoothstep
-  const scale = 1 - ease * 0.1;
+  const scale = 1 - ease * 0.12;
   const radius = 12 + ease * 36;
-  // Strong ghost: 100% → ~22% opacity (library clearly visible underneath)
-  const ghostOpacity = Math.max(0.22, 1 - ease * 0.78);
 
   fullPlayer.style.transform = `translate3d(0, ${y}px, 0) scale(${scale})`;
   fullPlayer.style.borderRadius = `${radius}px ${radius}px 0 0`;
-  fullPlayer.style.opacity = String(ghostOpacity);
+  // Keep chrome readable; do NOT fade the whole sheet (that hid the library)
+  fullPlayer.style.opacity = '1';
+  fullPlayer.style.background = 'transparent';
   fullPlayer.style.setProperty('--fp-ghost', String(ease));
+
+  // Solid dark plate → nearly gone so song list shows through
+  if (fullPlayerBg) {
+    fullPlayerBg.style.opacity = String(Math.max(0.06, 1 - ease * 0.94));
+    fullPlayerBg.style.background = ease > 0.15
+      ? `rgba(10, 10, 15, ${Math.max(0.05, 0.92 * (1 - ease))})`
+      : '';
+  }
+  if (fullPlayerBgVeil) {
+    fullPlayerBgVeil.style.opacity = String(Math.max(0, 1 - ease * 1.05));
+  }
   if (fullPlayerBackdropBlur) {
-    fullPlayerBackdropBlur.style.opacity = String(Math.max(0.08, 0.5 * (1 - ease * 0.95)));
+    fullPlayerBackdropBlur.style.opacity = String(Math.max(0.02, 0.5 * (1 - ease)));
   }
   fpDrag.pull = y;
 }
@@ -1827,9 +1846,11 @@ function fpDismissAnimated() {
   fullPlayer.classList.remove('fp-dragging', 'fp-snapping');
   fullPlayer.classList.add('fp-dismissing');
   const h = window.innerHeight || 700;
-  fullPlayer.style.transform = `translate3d(0, ${Math.round(h * 1.08)}px, 0) scale(0.92)`;
-  fullPlayer.style.opacity = '0.4';
+  fullPlayer.style.transform = `translate3d(0, ${Math.round(h * 1.08)}px, 0) scale(0.9)`;
+  fullPlayer.style.opacity = '0.55';
   fullPlayer.style.borderRadius = '36px 36px 0 0';
+  if (fullPlayerBg) fullPlayerBg.style.opacity = '0';
+  if (fullPlayerBgVeil) fullPlayerBgVeil.style.opacity = '0';
   setTimeout(() => closeFullPlayer(), 320);
 }
 
@@ -1846,7 +1867,13 @@ function fpSnapBack() {
     fullPlayer.style.transform = 'translate3d(0, 0, 0) scale(1)';
     fullPlayer.style.opacity = '1';
     fullPlayer.style.borderRadius = '0px';
+    fullPlayer.style.background = '';
     if (fullPlayerBackdropBlur) fullPlayerBackdropBlur.style.opacity = '';
+    if (fullPlayerBg) {
+      fullPlayerBg.style.opacity = '';
+      fullPlayerBg.style.background = '';
+    }
+    if (fullPlayerBgVeil) fullPlayerBgVeil.style.opacity = '';
   });
   setTimeout(() => {
     fullPlayer.classList.remove('fp-snapping');
