@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 30;
+const APP_BUILD = 31;
 
 const state = {
   db: null,
@@ -36,7 +36,8 @@ const state = {
   _meshUrl: null,
   _mediaHandlersBound: false,
   _fxTimers: [],
-  _lastFx: null
+  _lastFx: null,
+  _fxHistory: []       // anti-repeat recent FX names
 };
 
 const nativeRefreshGate = {
@@ -424,16 +425,18 @@ function songAffinity(a, b) {
   return score;
 }
 
-function fxLabel(type) {
-  switch (type) {
-    case 'cut': return 'Cắt liền';
-    case 'segue': return 'Chồng DJ';
-    case 'echo_cut': return 'Echo cut';
-    case 'punch': return 'Punch in';
-    case 'softland': return 'Hạ cánh';
-    case 'swap_late': return 'Swap muộn';
-    default: return type || 'DJ';
-  }
+function rememberFx(type) {
+  state._lastFx = type;
+  state._fxHistory.push(type);
+  if (state._fxHistory.length > 4) state._fxHistory.shift();
+}
+
+/** Prefer candidates not used in the last 2 handoffs */
+function pickFromPool(pool, spin) {
+  const recent = state._fxHistory.slice(-2);
+  const fresh = pool.filter((t) => !recent.includes(t));
+  const use = fresh.length ? fresh : pool;
+  return use[Math.abs(spin) % use.length];
 }
 
 /**
@@ -529,9 +532,8 @@ function promoteCompatibleNext(currentSong) {
 }
 
 /**
- * Pick a DJ-style handoff from tempo / energy / affinity.
- * Always rotates audible FX in shuffle — never stuck on one invisible cut.
- * Types: cut | segue | echo_cut | punch | softland | swap_late
+ * Smart DJ handoff picker — 12 audible FX, anti-repeat, tempo/energy aware.
+ * CPU-light: only a few setTimeout volume steps (no analyser / no toast spam).
  */
 function pickSmartTransition(fromSong, toSong) {
   if (!state.isShuffle) {
@@ -543,25 +545,31 @@ function pickSmartTransition(fromSong, toSong) {
   const dE = eTo - eFrom;
   const sameTempo = tempoBucket(fromSong) === tempoBucket(toSong);
   const nearTempo = Math.abs(tempoBucket(fromSong) - tempoBucket(toSong)) <= 1;
-  const spin = Math.abs(Math.round(eFrom * 3 + eTo * 5 + aff * 7 + (state.currentIndex || 0) * 11));
+  const spin = Math.abs(Math.round(
+    eFrom * 3 + eTo * 5 + aff * 7 + (state.currentIndex || 0) * 13 + (state._fxHistory.length || 0) * 17
+  ));
 
-  // Energy jumps get dedicated FX (most noticeable)
-  if (dE >= 12) return { type: 'punch', lead: 0.55 };
-  if (dE <= -12) return { type: 'softland', lead: 1.05 };
+  let pool;
+  let lead = 0.95;
 
-  // Close match → still audible DJ tools (rarely pure cut)
-  if (aff >= 6 && sameTempo) {
-    const pool = ['segue', 'echo_cut', 'cut', 'segue'];
-    return { type: pool[spin % pool.length], lead: 0.7 };
+  if (dE >= 14) {
+    pool = ['punch', 'slam', 'brake_go', 'climb'];
+    lead = 0.7;
+  } else if (dE <= -14) {
+    pool = ['softland', 'wash', 'drop_bridge', 'swell_out'];
+    lead = 1.15;
+  } else if (aff >= 6 && sameTempo) {
+    pool = ['segue', 'echo_cut', 'cross_snap', 'dip_swap', 'cut'];
+    lead = 0.85;
+  } else if (aff >= 3 && nearTempo) {
+    pool = ['echo_cut', 'segue', 'swap_late', 'drop_bridge', 'climb', 'cross_snap'];
+    lead = 1.0;
+  } else {
+    pool = ['slam', 'punch', 'wash', 'swap_late', 'brake_go', 'softland', 'stutter'];
+    lead = 1.05;
   }
-  if (aff >= 4 && nearTempo) {
-    const pool = ['echo_cut', 'segue', 'swap_late'];
-    return { type: pool[spin % pool.length], lead: 0.75 };
-  }
 
-  // Loose match → rotate the dramatic set
-  const pool = ['swap_late', 'punch', 'echo_cut', 'segue', 'softland'];
-  return { type: pool[spin % pool.length], lead: 0.85 };
+  return { type: pickFromPool(pool, spin), lead };
 }
 
 function getAutoHandoffLeadSec() {
@@ -596,8 +604,9 @@ function scheduleFx(ms, fn) {
   return id;
 }
 
-/** Run chosen FX with a few timed steps (audible, still light on CPU) */
+/** Audible multi-FX — max ~4 volume steps, no rAF loop / no toast */
 function runSmartHandoffFx(type, outgoing, incoming, vol) {
+  rememberFx(type);
   const endOut = () => {
     try { outgoing.pause(); } catch (e) {}
     outgoing.volume = vol;
@@ -608,55 +617,122 @@ function runSmartHandoffFx(type, outgoing, incoming, vol) {
   switch (type) {
     case 'cut':
       incoming.volume = vol;
-      outgoing.volume = vol * 0.7;
-      scheduleFx(120, endOut);
+      outgoing.volume = vol * 0.55;
+      scheduleFx(160, endOut);
       break;
 
     case 'segue':
-      // Both loud — clearly hear two tracks overlap
       incoming.volume = vol;
       outgoing.volume = vol;
-      scheduleFx(720, endOut);
+      scheduleFx(980, endOut);
       break;
 
     case 'echo_cut':
       incoming.volume = vol;
-      outgoing.volume = vol * 0.95;
-      scheduleFx(320, () => { outgoing.volume = vol * 0.5; });
-      scheduleFx(640, endOut);
+      outgoing.volume = vol;
+      scheduleFx(380, () => { outgoing.volume = vol * 0.45; });
+      scheduleFx(780, endOut);
       break;
 
     case 'punch':
-      outgoing.volume = vol * 0.25;
+      outgoing.volume = vol * 0.2;
       incoming.volume = 0;
-      scheduleFx(90, () => { incoming.volume = vol; });
-      scheduleFx(220, endOut);
+      scheduleFx(110, () => { incoming.volume = vol; });
+      scheduleFx(280, endOut);
+      break;
+
+    case 'slam':
+      // Silence pocket then full hit
+      outgoing.volume = 0;
+      incoming.volume = 0;
+      scheduleFx(130, () => { incoming.volume = vol; });
+      scheduleFx(200, endOut);
       break;
 
     case 'softland':
-      // Noticeable but short staged blend (not the old 2–3s default fade)
-      incoming.volume = vol * 0.15;
+      incoming.volume = vol * 0.12;
       outgoing.volume = vol;
-      scheduleFx(220, () => {
-        incoming.volume = vol * 0.45;
-        outgoing.volume = vol * 0.75;
-      });
-      scheduleFx(480, () => {
-        incoming.volume = vol * 0.8;
-        outgoing.volume = vol * 0.4;
-      });
-      scheduleFx(820, () => {
-        incoming.volume = vol;
-        endOut();
-      });
+      scheduleFx(280, () => { incoming.volume = vol * 0.4; outgoing.volume = vol * 0.72; });
+      scheduleFx(560, () => { incoming.volume = vol * 0.78; outgoing.volume = vol * 0.35; });
+      scheduleFx(920, () => { incoming.volume = vol; endOut(); });
+      break;
+
+    case 'wash':
+      // Longer takeover — clearly different from softland
+      incoming.volume = vol * 0.08;
+      outgoing.volume = vol;
+      scheduleFx(300, () => { incoming.volume = vol * 0.35; outgoing.volume = vol * 0.8; });
+      scheduleFx(620, () => { incoming.volume = vol * 0.7; outgoing.volume = vol * 0.45; });
+      scheduleFx(980, () => { incoming.volume = vol * 0.95; outgoing.volume = vol * 0.2; });
+      scheduleFx(1250, () => { incoming.volume = vol; endOut(); });
       break;
 
     case 'swap_late':
+      incoming.volume = vol;
+      outgoing.volume = vol * 0.95;
+      scheduleFx(280, () => { outgoing.volume = vol * 0.4; });
+      scheduleFx(620, endOut);
+      break;
+
+    case 'drop_bridge':
+      outgoing.volume = vol * 0.35;
+      incoming.volume = vol * 0.55;
+      scheduleFx(420, () => { incoming.volume = vol; outgoing.volume = vol * 0.2; });
+      scheduleFx(700, endOut);
+      break;
+
+    case 'climb':
+      // New track climbs over old (opposite of “fade out then up”)
+      incoming.volume = vol * 0.2;
+      outgoing.volume = vol;
+      scheduleFx(260, () => { incoming.volume = vol * 0.55; });
+      scheduleFx(520, () => { incoming.volume = vol; outgoing.volume = vol * 0.5; });
+      scheduleFx(820, endOut);
+      break;
+
+    case 'swell_out':
+      incoming.volume = vol;
+      outgoing.volume = vol;
+      scheduleFx(250, () => { outgoing.volume = vol * 0.65; });
+      scheduleFx(520, () => { outgoing.volume = vol * 0.3; });
+      scheduleFx(850, endOut);
+      break;
+
+    case 'brake_go':
+      outgoing.volume = vol * 0.15;
+      incoming.volume = 0;
+      scheduleFx(180, () => { incoming.volume = vol * 0.7; });
+      scheduleFx(320, () => { incoming.volume = vol; endOut(); });
+      break;
+
+    case 'dip_swap':
+      outgoing.volume = vol * 0.45;
+      incoming.volume = vol * 0.45;
+      scheduleFx(220, () => { incoming.volume = vol; outgoing.volume = vol * 0.25; });
+      scheduleFx(500, endOut);
+      break;
+
+    case 'cross_snap':
+      incoming.volume = vol * 0.35;
+      outgoing.volume = vol * 0.75;
+      scheduleFx(180, () => { incoming.volume = vol * 0.75; outgoing.volume = vol * 0.35; });
+      scheduleFx(360, () => { incoming.volume = vol; endOut(); });
+      break;
+
+    case 'stutter':
+      // 2 light ducks on outro then cut — DJ stutter feel, not pops
+      incoming.volume = 0;
+      outgoing.volume = vol;
+      scheduleFx(90, () => { outgoing.volume = vol * 0.25; });
+      scheduleFx(170, () => { outgoing.volume = vol * 0.85; });
+      scheduleFx(260, () => { outgoing.volume = vol * 0.2; incoming.volume = vol; });
+      scheduleFx(380, endOut);
+      break;
+
     default:
       incoming.volume = vol;
-      outgoing.volume = vol * 0.9;
-      scheduleFx(200, () => { outgoing.volume = vol * 0.45; });
-      scheduleFx(480, endOut);
+      outgoing.volume = vol * 0.5;
+      scheduleFx(400, endOut);
       break;
   }
 }
@@ -725,14 +801,13 @@ function toggleShuffle() {
   shuffleBtn.classList.toggle('text-pink-500', state.isShuffle);
   shuffleBtn.classList.toggle('text-white/60', !state.isShuffle);
   rebuildQueue(true);
-  if (state.isShuffle) {
-    if (shuffleBtn) shuffleBtn.title = 'DJ thông minh ON — hết bài mới có hiệu ứng chuyển';
-    const fx = pickSmartTransition(getCurrentSong(), getNextSong());
-    showToast(`DJ bật · lần hết bài: ${fxLabel(fx.type)}`, '🎛️');
-  } else {
-    if (shuffleBtn) shuffleBtn.title = 'Phát theo thứ tự';
-    showToast('Đã tắt xáo trộn', '➡️');
+  if (shuffleBtn) {
+    shuffleBtn.title = state.isShuffle
+      ? 'DJ thông minh ON — 12 kiểu chuyển, hết bài mới chạy (không toast)'
+      : 'Phát theo thứ tự';
   }
+  // One light toast only when toggling — not every song
+  showToast(state.isShuffle ? 'DJ thông minh đã bật' : 'Đã tắt xáo trộn', state.isShuffle ? '🎛️' : '➡️');
 }
 
 function toggleRepeat() {
@@ -884,10 +959,7 @@ async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
   }
 
   const fx = pickSmartTransition(fromSong, nextSong);
-  state._lastFx = fx.type;
-  if (state.isShuffle) {
-    showToast(fxLabel(fx.type), '🎛️');
-  }
+  // No per-track toast — avoids UI churn / lag / battery drip
 
   clearHandoffTimers();
   state.isCrossfading = true;
@@ -2716,11 +2788,11 @@ function setupEventHandlers() {
     shuffleDot.classList.remove('hidden');
     shuffleBtn.classList.add('text-pink-500');
     shuffleBtn.classList.remove('text-white/60');
-    if (shuffleBtn) shuffleBtn.title = 'Ngẫu nhiên thông minh — nhiều kiểu DJ theo tempo/tone';
+    if (shuffleBtn) shuffleBtn.title = 'DJ thông minh ON — 12 kiểu chuyển theo tempo/tone';
     rebuildQueue(false);
     playSongById(state.queue[0], false);
     openFullPlayer();
-    showToast('Ngẫu nhiên DJ thông minh đang chạy', '✨');
+    showToast('DJ thông minh đã bật', '🎛️');
   });
 
   // Scrubber / Seekbar

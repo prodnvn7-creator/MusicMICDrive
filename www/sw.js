@@ -1,5 +1,5 @@
-const CACHE_NAME = 'mm-drive-cache-v30';
-const APP_BUILD = 30;
+const CACHE_NAME = 'mm-drive-cache-v31';
+const APP_BUILD = 31;
 const STATIC_ASSETS = [
   './',
   './index.html',
