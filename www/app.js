@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 28;
+const APP_BUILD = 29;
 
 const state = {
   db: null,
@@ -34,7 +34,9 @@ const state = {
   _posTickAt: 0,
   _refinedSongId: null,
   _meshUrl: null,
-  _mediaHandlersBound: false
+  _mediaHandlersBound: false,
+  _fxTimers: [],
+  _lastFx: null
 };
 
 const nativeRefreshGate = {
@@ -505,19 +507,137 @@ function promoteCompatibleNext(currentSong) {
   }
 }
 
-/** How early (seconds) before end to fire auto handoff */
-function getAutoHandoffLeadSec() {
-  // Shuffle: short radio overlap. Ordered playlist: near-gapless.
-  return state.isShuffle ? 0.55 : 0.12;
+/**
+ * Pick a DJ-style handoff from tempo / energy / affinity.
+ * Cheap (cached estimates) — no audio analysis, no heat.
+ * Types: cut | segue | echo_cut | punch | softland | swap_late
+ */
+function pickSmartTransition(fromSong, toSong) {
+  if (!state.isShuffle) {
+    return { type: 'cut', lead: 0.12 };
+  }
+  const aff = songAffinity(fromSong, toSong);
+  const eFrom = estimateEnergy(fromSong);
+  const eTo = estimateEnergy(toSong);
+  const dE = eTo - eFrom;
+  const sameTempo = tempoBucket(fromSong) === tempoBucket(toSong);
+  const nearTempo = Math.abs(tempoBucket(fromSong) - tempoBucket(toSong)) <= 1;
+
+  // Same vibe → invisible cut / loud segue (NOT a long fade)
+  if (aff >= 8 && sameTempo) return { type: 'cut', lead: 0.1 };
+  if (aff >= 6 && sameTempo) return { type: 'segue', lead: 0.42 };
+  if (aff >= 5 && nearTempo) return { type: Math.random() < 0.5 ? 'segue' : 'echo_cut', lead: 0.4 };
+
+  // Energy jump up → punch-in; jump down → short soft landing (only case with brief blend)
+  if (dE >= 16) return { type: 'punch', lead: 0.32 };
+  if (dE <= -16) return { type: 'softland', lead: 0.75 };
+
+  // Mixed match → rotate among non-fade FX
+  if (aff >= 3) {
+    const pool = ['echo_cut', 'segue', 'swap_late'];
+    return { type: pool[(Math.abs(Math.round(eFrom + eTo + aff)) + (toSong.id || '').length) % pool.length], lead: 0.38 };
+  }
+  const cold = ['swap_late', 'cut', 'punch'];
+  return { type: cold[Math.floor(Math.random() * cold.length)], lead: 0.28 };
 }
 
-function stopFadeEngine() {
+function getAutoHandoffLeadSec() {
+  if (!state.isShuffle) return 0.12;
+  return pickSmartTransition(getCurrentSong(), getNextSong()).lead;
+}
+
+function clearHandoffTimers() {
   if (state.fadeInterval != null) {
     clearInterval(state.fadeInterval);
     clearTimeout(state.fadeInterval);
     state.fadeInterval = null;
   }
+  if (state._fxTimers && state._fxTimers.length) {
+    state._fxTimers.forEach((t) => clearTimeout(t));
+    state._fxTimers = [];
+  }
+}
+
+function stopFadeEngine() {
+  clearHandoffTimers();
   state.isCrossfading = false;
+}
+
+function scheduleFx(ms, fn) {
+  if (!state._fxTimers) state._fxTimers = [];
+  const id = setTimeout(() => {
+    state._fxTimers = (state._fxTimers || []).filter((x) => x !== id);
+    try { fn(); } catch (e) {}
+  }, ms);
+  state._fxTimers.push(id);
+  return id;
+}
+
+/** Run chosen FX with a few timed steps (no dense setInterval → cooler phone) */
+function runSmartHandoffFx(type, outgoing, incoming, vol) {
+  const endOut = () => {
+    try { outgoing.pause(); } catch (e) {}
+    outgoing.volume = vol;
+    releaseDeckLater(outgoing, 80);
+    state.isCrossfading = false;
+  };
+
+  switch (type) {
+    case 'cut':
+      // Gapless feel
+      incoming.volume = vol;
+      outgoing.volume = vol;
+      scheduleFx(70, endOut);
+      break;
+
+    case 'segue':
+      // Both loud briefly (radio DJ)
+      incoming.volume = vol;
+      outgoing.volume = vol;
+      scheduleFx(400, endOut);
+      break;
+
+    case 'echo_cut':
+      // Outro rides under new hook, then hard cut
+      incoming.volume = vol;
+      outgoing.volume = vol * 0.92;
+      scheduleFx(260, () => { outgoing.volume = vol * 0.55; });
+      scheduleFx(420, endOut);
+      break;
+
+    case 'punch':
+      // Tiny dip then slam next (energy-up)
+      outgoing.volume = vol * 0.4;
+      incoming.volume = 0;
+      scheduleFx(70, () => { incoming.volume = vol; });
+      scheduleFx(140, endOut);
+      break;
+
+    case 'softland':
+      // ONLY for big energy drop — short staged blend (≤0.7s), not long fade
+      incoming.volume = vol * 0.2;
+      outgoing.volume = vol;
+      scheduleFx(160, () => {
+        incoming.volume = vol * 0.55;
+        outgoing.volume = vol * 0.7;
+      });
+      scheduleFx(340, () => {
+        incoming.volume = vol * 0.85;
+        outgoing.volume = vol * 0.35;
+      });
+      scheduleFx(560, () => {
+        incoming.volume = vol;
+        endOut();
+      });
+      break;
+
+    case 'swap_late':
+    default:
+      incoming.volume = vol;
+      outgoing.volume = vol * 0.85;
+      scheduleFx(180, endOut);
+      break;
+  }
 }
 
 function waitDeckCanPlay(deck, timeoutMs = 6000) {
@@ -729,18 +849,20 @@ async function directPlaybackTransition(song) {
 }
 
 /**
- * Auto handoff when a track ends (shuffle / continuous play).
- * NOT a volume fade-out/fade-in — radio-style: next starts full loud,
- * previous keeps playing briefly then hard-cuts (no “nhỏ dần → to dần”).
+ * Auto handoff (shuffle): smart multi-FX from tempo/tone — not one default fade.
+ * Ordered playlist: near-gapless cut. Manual next never calls this.
  */
-async function performAutoSeamlessHandoff(nextSong) {
+async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
   if (!nextSong || !nextSong.audioUrl) return;
   if (document.hidden) {
     await directPlaybackTransition(nextSong);
     return;
   }
 
-  stopFadeEngine();
+  const fx = pickSmartTransition(fromSong, nextSong);
+  state._lastFx = fx.type;
+
+  clearHandoffTimers();
   state.isCrossfading = true;
 
   const outgoing = activeDeck;
@@ -749,7 +871,6 @@ async function performAutoSeamlessHandoff(nextSong) {
 
   const alreadyPreloaded =
     state.nextPreloadedId === nextSong.id &&
-    incoming.src &&
     incoming.readyState >= 2;
 
   if (!alreadyPreloaded) {
@@ -759,8 +880,8 @@ async function performAutoSeamlessHandoff(nextSong) {
   }
 
   try { incoming.currentTime = 0; } catch (e) {}
-  // Full volume from the first sample — no swell-in
-  incoming.volume = vol;
+  // Start muted; FX sets real volumes (avoids pop + accidental swell)
+  incoming.volume = 0;
 
   try {
     await incoming.play();
@@ -782,16 +903,7 @@ async function performAutoSeamlessHandoff(nextSong) {
   updatePlayPauseUI();
   updateMediaSessionPlaybackState();
 
-  // Shuffle: short loud overlap (segue). Ordered: almost immediate cut.
-  const holdMs = state.isShuffle ? 480 : 90;
-  if (state.fadeInterval) clearTimeout(state.fadeInterval);
-  state.fadeInterval = setTimeout(() => {
-    state.fadeInterval = null;
-    try { outgoing.pause(); } catch (e) {}
-    outgoing.volume = vol;
-    releaseDeckLater(outgoing, 80);
-    state.isCrossfading = false;
-  }, holdMs);
+  runSmartHandoffFx(fx.type, outgoing, incoming, vol);
 }
 
 function handleNext(manualTrigger = true) {
@@ -811,12 +923,12 @@ function handleNext(manualTrigger = true) {
   state.currentIndex = (state.currentIndex + 1) % state.queue.length;
   state.nextPreloadedId = manualTrigger ? null : state.nextPreloadedId;
 
-  // Manual skip = cut ngay. Auto (hết bài / shuffle) = seamless handoff.
+  // Manual skip = cut ngay. Auto (hết bài / shuffle) = smart multi-FX.
   if (manualTrigger || document.hidden) {
     state.nextPreloadedId = null;
     directPlaybackTransition(nextSong);
   } else {
-    performAutoSeamlessHandoff(nextSong);
+    performAutoSeamlessHandoff(nextSong, fromSong);
   }
 }
 
@@ -911,7 +1023,7 @@ function setupDeckEvents(deck) {
           state.currentIndex = (state.currentIndex + 1) % state.queue.length;
           state._refinedSongId = null;
           // Keep nextPreloadedId so handoff can reuse buffer
-          performAutoSeamlessHandoff(nextSong);
+          performAutoSeamlessHandoff(nextSong, currentSong);
         }
       }
     }
@@ -2577,11 +2689,11 @@ function setupEventHandlers() {
     shuffleDot.classList.remove('hidden');
     shuffleBtn.classList.add('text-pink-500');
     shuffleBtn.classList.remove('text-white/60');
-    if (shuffleBtn) shuffleBtn.title = 'Ngẫu nhiên liền mạch — hết bài chuyển kiểu radio, không fade nhỏ→to';
+    if (shuffleBtn) shuffleBtn.title = 'Ngẫu nhiên thông minh — nhiều kiểu DJ theo tempo/tone';
     rebuildQueue(false);
     playSongById(state.queue[0], false);
     openFullPlayer();
-    showToast('Ngẫu nhiên liền mạch đang chạy', '✨');
+    showToast('Ngẫu nhiên DJ thông minh đang chạy', '✨');
   });
 
   // Scrubber / Seekbar
