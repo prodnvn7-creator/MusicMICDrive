@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 29;
+const APP_BUILD = 30;
 
 const state = {
   db: null,
@@ -391,17 +391,26 @@ function tempoBucket(song) {
   return 0;
 }
 
+const GENERIC_ARTISTS = new Set([
+  '', 'unknown', 'unknown artist', 'music mic driver', 'mm drive', 'various artists'
+]);
+
+function isGenericArtist(name) {
+  return GENERIC_ARTISTS.has((name || '').trim().toLowerCase());
+}
+
 function songAffinity(a, b) {
   if (!a || !b) return 0;
   let score = 0;
   const aa = (a.artist || '').trim().toLowerCase();
   const ba = (b.artist || '').trim().toLowerCase();
-  if (aa && ba && aa === ba) score += 4;
-  else if (aa && ba && (aa.includes(ba) || ba.includes(aa))) score += 2;
+  // Don't treat default app artist as a real match (was forcing invisible "cut" every time)
+  if (aa && ba && aa === ba && !isGenericArtist(aa)) score += 4;
+  else if (aa && ba && !isGenericArtist(aa) && !isGenericArtist(ba) && (aa.includes(ba) || ba.includes(aa))) score += 2;
 
   const al = (a.album || '').trim().toLowerCase();
   const bl = (b.album || '').trim().toLowerCase();
-  if (al && bl && al === bl) score += 3;
+  if (al && bl && al === bl && al !== 'music mic driver') score += 3;
 
   if (tempoBucket(a) === tempoBucket(b)) score += 3;
   else if (Math.abs(tempoBucket(a) - tempoBucket(b)) === 1) score += 1;
@@ -413,6 +422,18 @@ function songAffinity(a, b) {
 
   if (Math.abs((a.duration || 0) - (b.duration || 0)) <= 20) score += 1;
   return score;
+}
+
+function fxLabel(type) {
+  switch (type) {
+    case 'cut': return 'Cắt liền';
+    case 'segue': return 'Chồng DJ';
+    case 'echo_cut': return 'Echo cut';
+    case 'punch': return 'Punch in';
+    case 'softland': return 'Hạ cánh';
+    case 'swap_late': return 'Swap muộn';
+    default: return type || 'DJ';
+  }
 }
 
 /**
@@ -509,7 +530,7 @@ function promoteCompatibleNext(currentSong) {
 
 /**
  * Pick a DJ-style handoff from tempo / energy / affinity.
- * Cheap (cached estimates) — no audio analysis, no heat.
+ * Always rotates audible FX in shuffle — never stuck on one invisible cut.
  * Types: cut | segue | echo_cut | punch | softland | swap_late
  */
 function pickSmartTransition(fromSong, toSong) {
@@ -522,23 +543,25 @@ function pickSmartTransition(fromSong, toSong) {
   const dE = eTo - eFrom;
   const sameTempo = tempoBucket(fromSong) === tempoBucket(toSong);
   const nearTempo = Math.abs(tempoBucket(fromSong) - tempoBucket(toSong)) <= 1;
+  const spin = Math.abs(Math.round(eFrom * 3 + eTo * 5 + aff * 7 + (state.currentIndex || 0) * 11));
 
-  // Same vibe → invisible cut / loud segue (NOT a long fade)
-  if (aff >= 8 && sameTempo) return { type: 'cut', lead: 0.1 };
-  if (aff >= 6 && sameTempo) return { type: 'segue', lead: 0.42 };
-  if (aff >= 5 && nearTempo) return { type: Math.random() < 0.5 ? 'segue' : 'echo_cut', lead: 0.4 };
+  // Energy jumps get dedicated FX (most noticeable)
+  if (dE >= 12) return { type: 'punch', lead: 0.55 };
+  if (dE <= -12) return { type: 'softland', lead: 1.05 };
 
-  // Energy jump up → punch-in; jump down → short soft landing (only case with brief blend)
-  if (dE >= 16) return { type: 'punch', lead: 0.32 };
-  if (dE <= -16) return { type: 'softland', lead: 0.75 };
-
-  // Mixed match → rotate among non-fade FX
-  if (aff >= 3) {
-    const pool = ['echo_cut', 'segue', 'swap_late'];
-    return { type: pool[(Math.abs(Math.round(eFrom + eTo + aff)) + (toSong.id || '').length) % pool.length], lead: 0.38 };
+  // Close match → still audible DJ tools (rarely pure cut)
+  if (aff >= 6 && sameTempo) {
+    const pool = ['segue', 'echo_cut', 'cut', 'segue'];
+    return { type: pool[spin % pool.length], lead: 0.7 };
   }
-  const cold = ['swap_late', 'cut', 'punch'];
-  return { type: cold[Math.floor(Math.random() * cold.length)], lead: 0.28 };
+  if (aff >= 4 && nearTempo) {
+    const pool = ['echo_cut', 'segue', 'swap_late'];
+    return { type: pool[spin % pool.length], lead: 0.75 };
+  }
+
+  // Loose match → rotate the dramatic set
+  const pool = ['swap_late', 'punch', 'echo_cut', 'segue', 'softland'];
+  return { type: pool[spin % pool.length], lead: 0.85 };
 }
 
 function getAutoHandoffLeadSec() {
@@ -573,7 +596,7 @@ function scheduleFx(ms, fn) {
   return id;
 }
 
-/** Run chosen FX with a few timed steps (no dense setInterval → cooler phone) */
+/** Run chosen FX with a few timed steps (audible, still light on CPU) */
 function runSmartHandoffFx(type, outgoing, incoming, vol) {
   const endOut = () => {
     try { outgoing.pause(); } catch (e) {}
@@ -584,48 +607,45 @@ function runSmartHandoffFx(type, outgoing, incoming, vol) {
 
   switch (type) {
     case 'cut':
-      // Gapless feel
       incoming.volume = vol;
-      outgoing.volume = vol;
-      scheduleFx(70, endOut);
+      outgoing.volume = vol * 0.7;
+      scheduleFx(120, endOut);
       break;
 
     case 'segue':
-      // Both loud briefly (radio DJ)
+      // Both loud — clearly hear two tracks overlap
       incoming.volume = vol;
       outgoing.volume = vol;
-      scheduleFx(400, endOut);
+      scheduleFx(720, endOut);
       break;
 
     case 'echo_cut':
-      // Outro rides under new hook, then hard cut
       incoming.volume = vol;
-      outgoing.volume = vol * 0.92;
-      scheduleFx(260, () => { outgoing.volume = vol * 0.55; });
-      scheduleFx(420, endOut);
+      outgoing.volume = vol * 0.95;
+      scheduleFx(320, () => { outgoing.volume = vol * 0.5; });
+      scheduleFx(640, endOut);
       break;
 
     case 'punch':
-      // Tiny dip then slam next (energy-up)
-      outgoing.volume = vol * 0.4;
+      outgoing.volume = vol * 0.25;
       incoming.volume = 0;
-      scheduleFx(70, () => { incoming.volume = vol; });
-      scheduleFx(140, endOut);
+      scheduleFx(90, () => { incoming.volume = vol; });
+      scheduleFx(220, endOut);
       break;
 
     case 'softland':
-      // ONLY for big energy drop — short staged blend (≤0.7s), not long fade
-      incoming.volume = vol * 0.2;
+      // Noticeable but short staged blend (not the old 2–3s default fade)
+      incoming.volume = vol * 0.15;
       outgoing.volume = vol;
-      scheduleFx(160, () => {
-        incoming.volume = vol * 0.55;
-        outgoing.volume = vol * 0.7;
+      scheduleFx(220, () => {
+        incoming.volume = vol * 0.45;
+        outgoing.volume = vol * 0.75;
       });
-      scheduleFx(340, () => {
-        incoming.volume = vol * 0.85;
-        outgoing.volume = vol * 0.35;
+      scheduleFx(480, () => {
+        incoming.volume = vol * 0.8;
+        outgoing.volume = vol * 0.4;
       });
-      scheduleFx(560, () => {
+      scheduleFx(820, () => {
         incoming.volume = vol;
         endOut();
       });
@@ -634,8 +654,9 @@ function runSmartHandoffFx(type, outgoing, incoming, vol) {
     case 'swap_late':
     default:
       incoming.volume = vol;
-      outgoing.volume = vol * 0.85;
-      scheduleFx(180, endOut);
+      outgoing.volume = vol * 0.9;
+      scheduleFx(200, () => { outgoing.volume = vol * 0.45; });
+      scheduleFx(480, endOut);
       break;
   }
 }
@@ -704,10 +725,13 @@ function toggleShuffle() {
   shuffleBtn.classList.toggle('text-pink-500', state.isShuffle);
   shuffleBtn.classList.toggle('text-white/60', !state.isShuffle);
   rebuildQueue(true);
-  if (state.isShuffle && shuffleBtn) {
-    shuffleBtn.title = 'Ngẫu nhiên liền mạch — tự lọc tempo, hết bài chuyển kiểu radio (không fade nhỏ→to)';
-  } else if (shuffleBtn) {
-    shuffleBtn.title = 'Phát theo thứ tự';
+  if (state.isShuffle) {
+    if (shuffleBtn) shuffleBtn.title = 'DJ thông minh ON — hết bài mới có hiệu ứng chuyển';
+    const fx = pickSmartTransition(getCurrentSong(), getNextSong());
+    showToast(`DJ bật · lần hết bài: ${fxLabel(fx.type)}`, '🎛️');
+  } else {
+    if (shuffleBtn) shuffleBtn.title = 'Phát theo thứ tự';
+    showToast('Đã tắt xáo trộn', '➡️');
   }
 }
 
@@ -861,6 +885,9 @@ async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
 
   const fx = pickSmartTransition(fromSong, nextSong);
   state._lastFx = fx.type;
+  if (state.isShuffle) {
+    showToast(fxLabel(fx.type), '🎛️');
+  }
 
   clearHandoffTimers();
   state.isCrossfading = true;
