@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 27;
+const APP_BUILD = 28;
 
 const state = {
   db: null,
@@ -505,19 +505,56 @@ function promoteCompatibleNext(currentSong) {
   }
 }
 
-/** Blend length — shuffle uses longer “invisible” DJ crossfades */
-function getSmartBlendDuration(fromSong, toSong, timeLeft) {
-  const affinity = songAffinity(fromSong, toSong);
-  let base;
-  if (state.isShuffle) {
-    base = affinity >= 6 ? 3.6 : affinity >= 4 ? 3.1 : affinity >= 2 ? 2.6 : 2.15;
-  } else {
-    base = affinity >= 4 ? 2.35 : affinity >= 2 ? 1.85 : 1.35;
+/** How early (seconds) before end to fire auto handoff */
+function getAutoHandoffLeadSec() {
+  // Shuffle: short radio overlap. Ordered playlist: near-gapless.
+  return state.isShuffle ? 0.55 : 0.12;
+}
+
+function stopFadeEngine() {
+  if (state.fadeInterval != null) {
+    clearInterval(state.fadeInterval);
+    clearTimeout(state.fadeInterval);
+    state.fadeInterval = null;
   }
-  if (typeof timeLeft === 'number' && timeLeft > 0) {
-    base = Math.min(base, Math.max(state.isShuffle ? 1.6 : 1.1, timeLeft - 0.08));
-  }
-  return base;
+  state.isCrossfading = false;
+}
+
+function waitDeckCanPlay(deck, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    if (!deck) return resolve(false);
+    if (deck.readyState >= 2) return resolve(true);
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      deck.removeEventListener('canplay', onReady);
+      deck.removeEventListener('loadeddata', onReady);
+      deck.removeEventListener('error', onErr);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const onReady = () => finish(true);
+    const onErr = () => finish(false);
+    const timer = setTimeout(() => finish(deck.readyState >= 2), timeoutMs);
+    deck.addEventListener('canplay', onReady);
+    deck.addEventListener('loadeddata', onReady);
+    deck.addEventListener('error', onErr);
+  });
+}
+
+/** Release decoder after pause — delayed so we don't click/pop */
+function releaseDeckLater(deck, delayMs = 90) {
+  if (!deck) return;
+  setTimeout(() => {
+    try {
+      if (deck === activeDeck) return;
+      deck.pause();
+      deck.removeAttribute('src');
+      deck.load();
+      deck.volume = state.masterVolume;
+    } catch (e) {}
+  }, delayMs);
 }
 
 function rebuildQueue(preserveCurrent = true) {
@@ -548,9 +585,9 @@ function toggleShuffle() {
   shuffleBtn.classList.toggle('text-white/60', !state.isShuffle);
   rebuildQueue(true);
   if (state.isShuffle && shuffleBtn) {
-    shuffleBtn.title = 'Seamless Smart Shuffle — tự lọc tempo, chuyển bài liền mạch';
+    shuffleBtn.title = 'Ngẫu nhiên liền mạch — tự lọc tempo, hết bài chuyển kiểu radio (không fade nhỏ→to)';
   } else if (shuffleBtn) {
-    shuffleBtn.title = 'Smart Shuffle (Fisher-Yates)';
+    shuffleBtn.title = 'Phát theo thứ tự';
   }
 }
 
@@ -615,12 +652,11 @@ function getPrevSong() {
 }
 
 /**
- * Play a specific song by ID
+ * Play a specific song by ID — always instant cut (no volume fade)
  */
-async function playSongById(id, withCrossfade = true) {
+async function playSongById(id, _withCrossfade = false) {
   const index = state.queue.indexOf(id);
   if (index === -1) {
-    // If not in queue, re-add
     state.queue.push(id);
     state.currentIndex = state.queue.length - 1;
   } else {
@@ -629,126 +665,138 @@ async function playSongById(id, withCrossfade = true) {
 
   const song = state.songs.find(s => s.id === id);
   if (!song) return;
-
-  // Check iOS Background vs Foreground state
-  const isBackgrounded = document.hidden === true;
-
-  if (withCrossfade && !isBackgrounded && state.isPlaying) {
-    const from = getCurrentSong();
-    performMashupTransition(song, getSmartBlendDuration(from, song, state.isShuffle ? 2.8 : 2.2), from);
-  } else {
-    directPlaybackTransition(song);
-  }
+  await directPlaybackTransition(song);
 }
 
 /**
- * Direct playback transition (used when launching, or when backgrounded on iOS/Android)
+ * Instant cut — no fade. Used for manual next/prev and tapping a track.
+ * Anti-pop: load on spare deck muted, then swap at full volume.
  */
 async function directPlaybackTransition(song) {
-  if (state.fadeInterval) {
-    clearInterval(state.fadeInterval);
-    state.fadeInterval = null;
-  }
-  state.isCrossfading = false;
+  if (!song || !song.audioUrl) return;
+  stopFadeEngine();
 
-  // Reset decks
-  activeDeck.pause();
-  inactiveDeck.pause();
-  activeDeck.currentTime = 0;
-  inactiveDeck.currentTime = 0;
-
-  activeDeck.src = song.audioUrl;
-  activeDeck.volume = state.masterVolume;
+  const outgoing = activeDeck;
+  const incoming = inactiveDeck;
+  const vol = state.masterVolume;
 
   state._refinedSongId = null;
-  updateUIWithSong(song);
-  updateMediaSession(song);
+  state.nextPreloadedId = null;
 
   try {
-    await activeDeck.play();
-    state.isPlaying = true;
-    updatePlayPauseUI();
-    updateMediaSessionPlaybackState();
+    incoming.pause();
+  } catch (e) {}
+  incoming.volume = 0;
+  incoming.src = song.audioUrl;
+  await waitDeckCanPlay(incoming);
+  try { incoming.currentTime = 0; } catch (e) {}
+  incoming.volume = vol;
+
+  try {
+    await incoming.play();
   } catch (err) {
     console.warn('Direct play error (requires user touch interaction):', err);
-    state.isPlaying = false;
-    updatePlayPauseUI();
+    // Fallback: try on active deck
+    try {
+      outgoing.pause();
+      outgoing.src = song.audioUrl;
+      outgoing.volume = vol;
+      await outgoing.play();
+      state.isPlaying = true;
+      updateUIWithSong(song);
+      updateMediaSession(song);
+      updatePlayPauseUI();
+      updateMediaSessionPlaybackState();
+    } catch (e2) {
+      state.isPlaying = false;
+      updatePlayPauseUI();
+    }
+    return;
   }
+
+  activeDeck = incoming;
+  inactiveDeck = outgoing;
+  state.isPlaying = true;
+
+  try { outgoing.pause(); } catch (e) {}
+  outgoing.volume = vol;
+  releaseDeckLater(outgoing, 100);
+
+  updateUIWithSong(song);
+  updateMediaSession(song);
+  updatePlayPauseUI();
+  updateMediaSessionPlaybackState();
 }
 
 /**
- * Intelligent Seamless Mashup DJ Blend Transition (Permanent Background DJ Engine)
- * Overlaps outgoing outro with incoming intro seamlessly like an uninterrupted continuous EP mix.
- * Equal-Power Sinusoidal Gain maintains constant perceived acoustic energy so the beat never drops.
+ * Auto handoff when a track ends (shuffle / continuous play).
+ * NOT a volume fade-out/fade-in — radio-style: next starts full loud,
+ * previous keeps playing briefly then hard-cuts (no “nhỏ dần → to dần”).
  */
-function performMashupTransition(nextSong, duration = 5.0, fromSong = null) {
-  if (state.isCrossfading || state.fadeInterval) {
-    if (state.fadeInterval) {
-      clearInterval(state.fadeInterval);
-      state.fadeInterval = null;
-    }
-    state.isCrossfading = false;
-    deckA.pause();
-    deckB.pause();
-    deckA.volume = state.masterVolume;
-    deckB.volume = state.masterVolume;
+async function performAutoSeamlessHandoff(nextSong) {
+  if (!nextSong || !nextSong.audioUrl) return;
+  if (document.hidden) {
+    await directPlaybackTransition(nextSong);
+    return;
   }
+
+  stopFadeEngine();
   state.isCrossfading = true;
 
-  const currentDeck = activeDeck;
-  const targetDeck = inactiveDeck;
-  const affinity = songAffinity(fromSong || getCurrentSong(), nextSong);
+  const outgoing = activeDeck;
+  const incoming = inactiveDeck;
+  const vol = state.masterVolume;
 
-  targetDeck.src = nextSong.audioUrl;
-  // Tiny intro skip on strong matches — feels more like a continuous mix
-  targetDeck.currentTime = (state.isShuffle && affinity >= 4) ? 0.1 : 0;
-  targetDeck.volume = 0;
+  const alreadyPreloaded =
+    state.nextPreloadedId === nextSong.id &&
+    incoming.src &&
+    incoming.readyState >= 2;
+
+  if (!alreadyPreloaded) {
+    incoming.volume = 0;
+    incoming.src = nextSong.audioUrl;
+    await waitDeckCanPlay(incoming);
+  }
+
+  try { incoming.currentTime = 0; } catch (e) {}
+  // Full volume from the first sample — no swell-in
+  incoming.volume = vol;
+
+  try {
+    await incoming.play();
+  } catch (err) {
+    console.warn('Auto handoff play error, fallback direct:', err);
+    state.isCrossfading = false;
+    await directPlaybackTransition(nextSong);
+    return;
+  }
+
+  activeDeck = incoming;
+  inactiveDeck = outgoing;
+  state.isPlaying = true;
+  state._refinedSongId = null;
+  state.nextPreloadedId = null;
 
   updateUIWithSong(nextSong);
   updateMediaSession(nextSong);
+  updatePlayPauseUI();
+  updateMediaSessionPlaybackState();
 
-  targetDeck.play().then(() => {
-    activeDeck = targetDeck;
-    inactiveDeck = currentDeck;
-
-    const intervalTime = 50; // ~20fps fade — smooth enough, far less CPU/heat
-    const steps = Math.max(20, Math.round((duration * 1000) / intervalTime));
-    let stepCount = 0;
-
-    if (state.fadeInterval) clearInterval(state.fadeInterval);
-    state.fadeInterval = setInterval(() => {
-      stepCount++;
-      const progress = Math.min(1, stepCount / steps);
-
-      // Equal-power curve — perceived loudness stays flat across the blend
-      const angle = progress * 0.5 * Math.PI;
-      const fadeOut = Math.cos(angle);
-      const fadeIn = Math.sin(angle);
-
-      inactiveDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeOut));
-      activeDeck.volume = Math.max(0, Math.min(1, state.masterVolume * fadeIn));
-
-      if (stepCount >= steps) {
-        clearInterval(state.fadeInterval);
-        state.fadeInterval = null;
-        inactiveDeck.pause();
-        inactiveDeck.removeAttribute('src');
-        try { inactiveDeck.load(); } catch (e) {}
-        inactiveDeck.volume = state.masterVolume;
-        activeDeck.volume = state.masterVolume;
-        state.isCrossfading = false;
-      }
-    }, intervalTime);
-  }).catch((err) => {
-    console.warn('Mashup transition play error, fallback to direct:', err);
+  // Shuffle: short loud overlap (segue). Ordered: almost immediate cut.
+  const holdMs = state.isShuffle ? 480 : 90;
+  if (state.fadeInterval) clearTimeout(state.fadeInterval);
+  state.fadeInterval = setTimeout(() => {
+    state.fadeInterval = null;
+    try { outgoing.pause(); } catch (e) {}
+    outgoing.volume = vol;
+    releaseDeckLater(outgoing, 80);
     state.isCrossfading = false;
-    directPlaybackTransition(nextSong);
-  });
+  }, holdMs);
 }
 
 function handleNext(manualTrigger = true) {
   const fromSong = getCurrentSong();
-  if (!document.hidden && state.isPlaying) {
+  if (!manualTrigger && !document.hidden && state.isPlaying) {
     promoteCompatibleNext(fromSong);
   }
 
@@ -761,40 +809,30 @@ function handleNext(manualTrigger = true) {
   }
 
   state.currentIndex = (state.currentIndex + 1) % state.queue.length;
-  state.nextPreloadedId = null;
+  state.nextPreloadedId = manualTrigger ? null : state.nextPreloadedId;
 
-  const isBackgrounded = document.hidden === true;
-  if (!isBackgrounded && state.isPlaying) {
-    const blend = getSmartBlendDuration(
-      fromSong,
-      nextSong,
-      manualTrigger ? (state.isShuffle ? 2.4 : 1.7) : (state.isShuffle ? 3.0 : 2.1)
-    );
-    performMashupTransition(nextSong, blend, fromSong);
-  } else {
+  // Manual skip = cut ngay. Auto (hết bài / shuffle) = seamless handoff.
+  if (manualTrigger || document.hidden) {
+    state.nextPreloadedId = null;
     directPlaybackTransition(nextSong);
+  } else {
+    performAutoSeamlessHandoff(nextSong);
   }
 }
 
 function handlePrev() {
   if (activeDeck.currentTime > 3) {
-    activeDeck.currentTime = 0;
+    try { activeDeck.currentTime = 0; } catch (e) {}
     return;
   }
 
-  const fromSong = getCurrentSong();
   const prevSong = getPrevSong();
   if (!prevSong) return;
 
   state.currentIndex = (state.currentIndex - 1 + state.queue.length) % state.queue.length;
   state.nextPreloadedId = null;
-
-  const isBackgrounded = document.hidden === true;
-  if (!isBackgrounded && state.isPlaying) {
-    performMashupTransition(prevSong, getSmartBlendDuration(fromSong, prevSong, state.isShuffle ? 2.2 : 1.5), fromSong);
-  } else {
-    directPlaybackTransition(prevSong);
-  }
+  // Always instant on prev
+  directPlaybackTransition(prevSong);
 }
 
 function togglePlayPause() {
@@ -845,18 +883,19 @@ function setupDeckEvents(deck) {
       syncMediaSessionPositionState();
     }
 
-    // Seamless auto-mix near end
+    // Auto handoff near end — preload early; no long volume fade
     if (!state.isCrossfading && state.isPlaying && dur > 6 && !document.hidden) {
       const timeLeft = dur - cur;
       const currentSong = getCurrentSong();
-      const preloadAt = state.isShuffle ? 16 : 12;
-      const blendAt = state.isShuffle ? 3.2 : 2.4;
+      const preloadAt = state.isShuffle ? 14 : 10;
+      const handoffAt = getAutoHandoffLeadSec();
 
-      if (timeLeft <= preloadAt && timeLeft > blendAt + 0.5) {
+      if (timeLeft <= preloadAt && timeLeft > handoffAt + 0.35) {
         promoteCompatibleNext(currentSong);
         const upcoming = getNextSong();
         if (upcoming && upcoming.audioUrl && state.nextPreloadedId !== upcoming.id) {
           try {
+            inactiveDeck.volume = 0;
             inactiveDeck.src = upcoming.audioUrl;
             inactiveDeck.preload = 'auto';
             inactiveDeck.load();
@@ -865,42 +904,32 @@ function setupDeckEvents(deck) {
         }
       }
 
-      if (timeLeft <= blendAt && timeLeft > 0.2) {
+      if (timeLeft <= handoffAt && timeLeft > 0.05) {
         promoteCompatibleNext(currentSong);
         const nextSong = getNextSong();
         if (nextSong) {
           state.currentIndex = (state.currentIndex + 1) % state.queue.length;
-          state.nextPreloadedId = null;
           state._refinedSongId = null;
-          const blendLead = getSmartBlendDuration(currentSong, nextSong, timeLeft);
-          performMashupTransition(nextSong, blendLead, currentSong);
+          // Keep nextPreloadedId so handoff can reuse buffer
+          performAutoSeamlessHandoff(nextSong);
         }
       }
     }
   });
 
-  // Track ended event (Seamless direct handoff for iOS background mode)
+  // Track ended — backup if handoff didn't fire
   deck.addEventListener('ended', () => {
     if (deck === inactiveDeck) {
-      deck.pause();
-      deck.currentTime = 0;
+      try { deck.pause(); } catch (e) {}
       deck.volume = state.masterVolume;
-      if (state.isCrossfading) {
-        if (state.fadeInterval) {
-          clearInterval(state.fadeInterval);
-          state.fadeInterval = null;
-        }
-        activeDeck.volume = state.masterVolume;
-        state.isCrossfading = false;
-      }
       return;
     }
     if (deck !== activeDeck) return;
     if (state.isCrossfading) return;
 
     if (state.repeatMode === 'one') {
-      deck.currentTime = 0;
-      deck.play();
+      try { deck.currentTime = 0; } catch (e) {}
+      deck.play().catch(() => {});
     } else {
       handleNext(false);
     }
