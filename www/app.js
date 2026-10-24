@@ -2577,11 +2577,11 @@ function setupEventHandlers() {
     shuffleDot.classList.remove('hidden');
     shuffleBtn.classList.add('text-pink-500');
     shuffleBtn.classList.remove('text-white/60');
-    if (shuffleBtn) shuffleBtn.title = 'Seamless Smart Shuffle — tự lọc tempo, chuyển bài liền mạch';
+    if (shuffleBtn) shuffleBtn.title = 'Ngẫu nhiên liền mạch — hết bài chuyển kiểu radio, không fade nhỏ→to';
     rebuildQueue(false);
     playSongById(state.queue[0], false);
     openFullPlayer();
-    showToast('Seamless Mix đang chạy', '✨');
+    showToast('Ngẫu nhiên liền mạch đang chạy', '✨');
   });
 
   // Scrubber / Seekbar
