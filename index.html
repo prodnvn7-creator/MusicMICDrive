@@ -20,7 +20,7 @@
 
   <!-- Local Tailwind & Custom CSS -->
   <script src="tailwind.js"></script>
-  <link rel="stylesheet" href="style.css?v=31">
+  <link rel="stylesheet" href="style.css?v=32">
 
   <!-- jsmediatags for ID3 reading -->
   <script src="jsmediatags.min.js"></script>
@@ -437,6 +437,28 @@
   <input type="file" id="freeFileInput" multiple accept="*/*" class="hidden">
 
   <!-- Core App Logic -->
-  <script src="app.js?v=31"></script>
+  <!-- iOS Safari: no Chrome-style Install — guide Add to Home Screen -->
+  <div id="iosInstallSheet" class="ios-install-sheet hidden" role="dialog" aria-label="Cài đặt trên iPhone">
+    <div class="ios-install-card">
+      <button type="button" id="iosInstallClose" class="ios-install-close" aria-label="Đóng">×</button>
+      <div class="ios-install-title">Cài ra màn hình chính</div>
+      <p class="ios-install-desc">Safari không có nút “Cài đặt” như Chrome. Làm 1 lần để mở như app (toàn màn hình, tiện hơn):</p>
+      <ol class="ios-install-steps">
+        <li>
+          Chạm
+          <span class="ios-share-pill">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v10M8 7l4-4 4 4M5 14v5a2 2 0 002 2h10a2 2 0 002-2v-5"/></svg>
+            Chia sẻ
+          </span>
+          trên thanh Safari
+        </li>
+        <li>Vuốt xuống → <strong>Thêm vào Màn hình chính</strong></li>
+        <li>Bấm <strong>Thêm</strong> → mở icon Music MIC Driver</li>
+      </ol>
+      <button type="button" id="iosInstallGotIt" class="ios-install-cta">Đã hiểu</button>
+    </div>
+  </div>
+
+  <script src="app.js?v=32"></script>
 </body>
 </html>

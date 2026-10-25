@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 31;
+const APP_BUILD = 32;
 
 const state = {
   db: null,
@@ -81,6 +81,110 @@ let deckA = document.getElementById('deckA');
 let deckB = document.getElementById('deckB');
 let activeDeck = deckA;
 let inactiveDeck = deckB;
+
+/** Web Audio: broadcast compressor = smart loudness leveling (quiet≈loud) */
+let audioGraph = null;
+
+function ensureAudioGraph() {
+  if (audioGraph) return audioGraph;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC || !deckA || !deckB) return null;
+  try {
+    const ctx = new AC();
+    const srcA = ctx.createMediaElementSource(deckA);
+    const srcB = ctx.createMediaElementSource(deckB);
+    const bus = ctx.createGain();
+    bus.gain.value = 1;
+
+    // Level tracks of different loudness without per-file analysis
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -22;
+    comp.knee.value = 14;
+    comp.ratio.value = 3.2;
+    comp.attack.value = 0.012;
+    comp.release.value = 0.22;
+
+    const makeup = ctx.createGain();
+    makeup.gain.value = 1.12;
+
+    // Soft ceiling — prevent sudden peaks / pop spikes
+    const limit = ctx.createDynamicsCompressor();
+    limit.threshold.value = -2.5;
+    limit.knee.value = 0.5;
+    limit.ratio.value = 16;
+    limit.attack.value = 0.003;
+    limit.release.value = 0.08;
+
+    srcA.connect(bus);
+    srcB.connect(bus);
+    bus.connect(comp);
+    comp.connect(makeup);
+    makeup.connect(limit);
+    limit.connect(ctx.destination);
+
+    audioGraph = { ctx, bus, comp, makeup, limit };
+  } catch (e) {
+    console.warn('Audio graph init failed (fallback to element volume):', e);
+    audioGraph = null;
+  }
+  return audioGraph;
+}
+
+async function resumeAudioGraph() {
+  const g = ensureAudioGraph();
+  if (g && g.ctx && g.ctx.state === 'suspended') {
+    try { await g.ctx.resume(); } catch (e) {}
+  }
+}
+
+function setDeckVol(deck, v) {
+  if (!deck) return;
+  try {
+    deck.volume = Math.max(0, Math.min(1, v));
+  } catch (e) {}
+}
+
+/** Micro ramp — kills click/pop when jumping volume */
+function rampDeckVol(deck, target, durationMs = 45, steps = 3) {
+  if (!deck) return;
+  const start = typeof deck.volume === 'number' ? deck.volume : 0;
+  const end = Math.max(0, Math.min(1, target));
+  if (steps < 1 || durationMs < 8) {
+    setDeckVol(deck, end);
+    return;
+  }
+  const stepMs = Math.max(8, Math.floor(durationMs / steps));
+  for (let i = 1; i <= steps; i++) {
+    const t = start + (end - start) * (i / steps);
+    scheduleFx(stepMs * i, () => setDeckVol(deck, t));
+  }
+}
+
+async function playDeckAntiPop(deck, targetVol) {
+  await resumeAudioGraph();
+  setDeckVol(deck, 0);
+  await deck.play();
+  // Soft open — never 0→full in one sample
+  setDeckVol(deck, targetVol * 0.28);
+  await new Promise((r) => setTimeout(r, 18));
+  setDeckVol(deck, targetVol * 0.65);
+  await new Promise((r) => setTimeout(r, 18));
+  setDeckVol(deck, targetVol);
+}
+
+function stopDeckAntiPop(deck, thenFn) {
+  if (!deck) {
+    if (thenFn) thenFn();
+    return;
+  }
+  const v = deck.volume || 0;
+  setDeckVol(deck, v * 0.35);
+  setTimeout(() => {
+    setDeckVol(deck, 0);
+    try { deck.pause(); } catch (e) {}
+    if (thenFn) thenFn();
+  }, 32);
+}
 
 // DOM Elements
 const libraryView = document.getElementById('libraryView');
@@ -552,21 +656,22 @@ function pickSmartTransition(fromSong, toSong) {
   let pool;
   let lead = 0.95;
 
+  // No slam/stutter — those hard-mute → full and cause “bụp”
   if (dE >= 14) {
-    pool = ['punch', 'slam', 'brake_go', 'climb'];
-    lead = 0.7;
+    pool = ['punch', 'brake_go', 'climb', 'dip_swap'];
+    lead = 0.75;
   } else if (dE <= -14) {
     pool = ['softland', 'wash', 'drop_bridge', 'swell_out'];
-    lead = 1.15;
+    lead = 1.2;
   } else if (aff >= 6 && sameTempo) {
     pool = ['segue', 'echo_cut', 'cross_snap', 'dip_swap', 'cut'];
-    lead = 0.85;
+    lead = 0.9;
   } else if (aff >= 3 && nearTempo) {
     pool = ['echo_cut', 'segue', 'swap_late', 'drop_bridge', 'climb', 'cross_snap'];
-    lead = 1.0;
-  } else {
-    pool = ['slam', 'punch', 'wash', 'swap_late', 'brake_go', 'softland', 'stutter'];
     lead = 1.05;
+  } else {
+    pool = ['punch', 'wash', 'swap_late', 'brake_go', 'softland', 'climb', 'cross_snap'];
+    lead = 1.1;
   }
 
   return { type: pickFromPool(pool, spin), lead };
@@ -604,135 +709,154 @@ function scheduleFx(ms, fn) {
   return id;
 }
 
-/** Audible multi-FX — max ~4 volume steps, no rAF loop / no toast */
+/** Pro DJ FX — smooth ramps only (no hard mute→blast = no bụp) */
 function runSmartHandoffFx(type, outgoing, incoming, vol) {
   rememberFx(type);
   const endOut = () => {
-    try { outgoing.pause(); } catch (e) {}
-    outgoing.volume = vol;
-    releaseDeckLater(outgoing, 80);
-    state.isCrossfading = false;
+    stopDeckAntiPop(outgoing, () => {
+      setDeckVol(outgoing, vol);
+      releaseDeckLater(outgoing, 160);
+      state.isCrossfading = false;
+    });
+  };
+
+  // Always open incoming softly from a low (not zero digital edge)
+  const openIn = (target, ms = 70) => {
+    setDeckVol(incoming, Math.max(0.04, target * 0.2));
+    rampDeckVol(incoming, target, ms, 3);
   };
 
   switch (type) {
     case 'cut':
-      incoming.volume = vol;
-      outgoing.volume = vol * 0.55;
-      scheduleFx(160, endOut);
+      openIn(vol, 55);
+      rampDeckVol(outgoing, vol * 0.4, 80, 2);
+      scheduleFx(180, endOut);
       break;
 
     case 'segue':
-      incoming.volume = vol;
-      outgoing.volume = vol;
-      scheduleFx(980, endOut);
+      openIn(vol, 90);
+      setDeckVol(outgoing, vol);
+      scheduleFx(900, endOut);
       break;
 
     case 'echo_cut':
-      incoming.volume = vol;
-      outgoing.volume = vol;
-      scheduleFx(380, () => { outgoing.volume = vol * 0.45; });
+      openIn(vol, 80);
+      setDeckVol(outgoing, vol);
+      scheduleFx(400, () => rampDeckVol(outgoing, vol * 0.4, 120, 3));
       scheduleFx(780, endOut);
       break;
 
     case 'punch':
-      outgoing.volume = vol * 0.2;
-      incoming.volume = 0;
-      scheduleFx(110, () => { incoming.volume = vol; });
-      scheduleFx(280, endOut);
-      break;
-
-    case 'slam':
-      // Silence pocket then full hit
-      outgoing.volume = 0;
-      incoming.volume = 0;
-      scheduleFx(130, () => { incoming.volume = vol; });
-      scheduleFx(200, endOut);
+      rampDeckVol(outgoing, vol * 0.28, 70, 2);
+      openIn(vol, 100);
+      scheduleFx(300, endOut);
       break;
 
     case 'softland':
-      incoming.volume = vol * 0.12;
-      outgoing.volume = vol;
-      scheduleFx(280, () => { incoming.volume = vol * 0.4; outgoing.volume = vol * 0.72; });
-      scheduleFx(560, () => { incoming.volume = vol * 0.78; outgoing.volume = vol * 0.35; });
-      scheduleFx(920, () => { incoming.volume = vol; endOut(); });
+      openIn(vol * 0.22, 100);
+      setDeckVol(outgoing, vol);
+      scheduleFx(280, () => {
+        rampDeckVol(incoming, vol * 0.5, 100, 2);
+        rampDeckVol(outgoing, vol * 0.7, 100, 2);
+      });
+      scheduleFx(560, () => {
+        rampDeckVol(incoming, vol * 0.85, 100, 2);
+        rampDeckVol(outgoing, vol * 0.32, 100, 2);
+      });
+      scheduleFx(920, () => {
+        setDeckVol(incoming, vol);
+        endOut();
+      });
       break;
 
     case 'wash':
-      // Longer takeover — clearly different from softland
-      incoming.volume = vol * 0.08;
-      outgoing.volume = vol;
-      scheduleFx(300, () => { incoming.volume = vol * 0.35; outgoing.volume = vol * 0.8; });
-      scheduleFx(620, () => { incoming.volume = vol * 0.7; outgoing.volume = vol * 0.45; });
-      scheduleFx(980, () => { incoming.volume = vol * 0.95; outgoing.volume = vol * 0.2; });
-      scheduleFx(1250, () => { incoming.volume = vol; endOut(); });
+      openIn(vol * 0.15, 120);
+      setDeckVol(outgoing, vol);
+      scheduleFx(320, () => {
+        rampDeckVol(incoming, vol * 0.42, 120, 2);
+        rampDeckVol(outgoing, vol * 0.75, 120, 2);
+      });
+      scheduleFx(650, () => {
+        rampDeckVol(incoming, vol * 0.78, 120, 2);
+        rampDeckVol(outgoing, vol * 0.4, 120, 2);
+      });
+      scheduleFx(1000, () => {
+        rampDeckVol(incoming, vol, 100, 2);
+        rampDeckVol(outgoing, vol * 0.18, 100, 2);
+      });
+      scheduleFx(1280, endOut);
       break;
 
     case 'swap_late':
-      incoming.volume = vol;
-      outgoing.volume = vol * 0.95;
-      scheduleFx(280, () => { outgoing.volume = vol * 0.4; });
-      scheduleFx(620, endOut);
+      openIn(vol, 90);
+      setDeckVol(outgoing, vol * 0.92);
+      scheduleFx(300, () => rampDeckVol(outgoing, vol * 0.38, 140, 3));
+      scheduleFx(650, endOut);
       break;
 
     case 'drop_bridge':
-      outgoing.volume = vol * 0.35;
-      incoming.volume = vol * 0.55;
-      scheduleFx(420, () => { incoming.volume = vol; outgoing.volume = vol * 0.2; });
-      scheduleFx(700, endOut);
+      rampDeckVol(outgoing, vol * 0.38, 100, 2);
+      openIn(vol * 0.6, 100);
+      scheduleFx(420, () => {
+        rampDeckVol(incoming, vol, 120, 2);
+        rampDeckVol(outgoing, vol * 0.22, 120, 2);
+      });
+      scheduleFx(720, endOut);
       break;
 
     case 'climb':
-      // New track climbs over old (opposite of “fade out then up”)
-      incoming.volume = vol * 0.2;
-      outgoing.volume = vol;
-      scheduleFx(260, () => { incoming.volume = vol * 0.55; });
-      scheduleFx(520, () => { incoming.volume = vol; outgoing.volume = vol * 0.5; });
-      scheduleFx(820, endOut);
+      openIn(vol * 0.25, 100);
+      setDeckVol(outgoing, vol);
+      scheduleFx(280, () => rampDeckVol(incoming, vol * 0.6, 120, 2));
+      scheduleFx(540, () => {
+        rampDeckVol(incoming, vol, 100, 2);
+        rampDeckVol(outgoing, vol * 0.45, 100, 2);
+      });
+      scheduleFx(860, endOut);
       break;
 
     case 'swell_out':
-      incoming.volume = vol;
-      outgoing.volume = vol;
-      scheduleFx(250, () => { outgoing.volume = vol * 0.65; });
-      scheduleFx(520, () => { outgoing.volume = vol * 0.3; });
-      scheduleFx(850, endOut);
+      openIn(vol, 80);
+      setDeckVol(outgoing, vol);
+      scheduleFx(260, () => rampDeckVol(outgoing, vol * 0.6, 120, 2));
+      scheduleFx(540, () => rampDeckVol(outgoing, vol * 0.28, 120, 2));
+      scheduleFx(880, endOut);
       break;
 
     case 'brake_go':
-      outgoing.volume = vol * 0.15;
-      incoming.volume = 0;
-      scheduleFx(180, () => { incoming.volume = vol * 0.7; });
-      scheduleFx(320, () => { incoming.volume = vol; endOut(); });
-      break;
-
-    case 'dip_swap':
-      outgoing.volume = vol * 0.45;
-      incoming.volume = vol * 0.45;
-      scheduleFx(220, () => { incoming.volume = vol; outgoing.volume = vol * 0.25; });
-      scheduleFx(500, endOut);
-      break;
-
-    case 'cross_snap':
-      incoming.volume = vol * 0.35;
-      outgoing.volume = vol * 0.75;
-      scheduleFx(180, () => { incoming.volume = vol * 0.75; outgoing.volume = vol * 0.35; });
-      scheduleFx(360, () => { incoming.volume = vol; endOut(); });
-      break;
-
-    case 'stutter':
-      // 2 light ducks on outro then cut — DJ stutter feel, not pops
-      incoming.volume = 0;
-      outgoing.volume = vol;
-      scheduleFx(90, () => { outgoing.volume = vol * 0.25; });
-      scheduleFx(170, () => { outgoing.volume = vol * 0.85; });
-      scheduleFx(260, () => { outgoing.volume = vol * 0.2; incoming.volume = vol; });
+      rampDeckVol(outgoing, vol * 0.22, 90, 2);
+      openIn(vol * 0.55, 100);
+      scheduleFx(220, () => rampDeckVol(incoming, vol, 90, 2));
       scheduleFx(380, endOut);
       break;
 
+    case 'dip_swap':
+      rampDeckVol(outgoing, vol * 0.48, 90, 2);
+      openIn(vol * 0.48, 90);
+      scheduleFx(240, () => {
+        rampDeckVol(incoming, vol, 100, 2);
+        rampDeckVol(outgoing, vol * 0.28, 100, 2);
+      });
+      scheduleFx(520, endOut);
+      break;
+
+    case 'cross_snap':
+      openIn(vol * 0.4, 80);
+      rampDeckVol(outgoing, vol * 0.7, 80, 2);
+      scheduleFx(200, () => {
+        rampDeckVol(incoming, vol * 0.8, 90, 2);
+        rampDeckVol(outgoing, vol * 0.32, 90, 2);
+      });
+      scheduleFx(400, () => {
+        setDeckVol(incoming, vol);
+        endOut();
+      });
+      break;
+
     default:
-      incoming.volume = vol;
-      outgoing.volume = vol * 0.5;
-      scheduleFx(400, endOut);
+      openIn(vol, 80);
+      rampDeckVol(outgoing, vol * 0.45, 120, 2);
+      scheduleFx(420, endOut);
       break;
   }
 }
@@ -760,16 +884,17 @@ function waitDeckCanPlay(deck, timeoutMs = 6000) {
   });
 }
 
-/** Release decoder after pause — delayed so we don't click/pop */
-function releaseDeckLater(deck, delayMs = 90) {
+/** Release decoder after pause — mute first, delay load (avoids click) */
+function releaseDeckLater(deck, delayMs = 160) {
   if (!deck) return;
+  setDeckVol(deck, 0);
   setTimeout(() => {
     try {
       if (deck === activeDeck) return;
       deck.pause();
       deck.removeAttribute('src');
       deck.load();
-      deck.volume = state.masterVolume;
+      setDeckVol(deck, state.masterVolume);
     } catch (e) {}
   }, delayMs);
 }
@@ -888,12 +1013,12 @@ async function playSongById(id, _withCrossfade = false) {
 }
 
 /**
- * Instant cut — no fade. Used for manual next/prev and tapping a track.
- * Anti-pop: load on spare deck muted, then swap at full volume.
+ * Instant skip — no DJ FX. Soft open/close so Next không còn bụp.
  */
 async function directPlaybackTransition(song) {
   if (!song || !song.audioUrl) return;
   stopFadeEngine();
+  await resumeAudioGraph();
 
   const outgoing = activeDeck;
   const incoming = inactiveDeck;
@@ -902,25 +1027,21 @@ async function directPlaybackTransition(song) {
   state._refinedSongId = null;
   state.nextPreloadedId = null;
 
-  try {
-    incoming.pause();
-  } catch (e) {}
-  incoming.volume = 0;
+  try { incoming.pause(); } catch (e) {}
+  setDeckVol(incoming, 0);
   incoming.src = song.audioUrl;
   await waitDeckCanPlay(incoming);
   try { incoming.currentTime = 0; } catch (e) {}
-  incoming.volume = vol;
 
   try {
-    await incoming.play();
+    await playDeckAntiPop(incoming, vol);
   } catch (err) {
     console.warn('Direct play error (requires user touch interaction):', err);
-    // Fallback: try on active deck
     try {
-      outgoing.pause();
+      stopDeckAntiPop(outgoing);
       outgoing.src = song.audioUrl;
-      outgoing.volume = vol;
-      await outgoing.play();
+      await playDeckAntiPop(outgoing, vol);
+      activeDeck = outgoing;
       state.isPlaying = true;
       updateUIWithSong(song);
       updateMediaSession(song);
@@ -937,9 +1058,7 @@ async function directPlaybackTransition(song) {
   inactiveDeck = outgoing;
   state.isPlaying = true;
 
-  try { outgoing.pause(); } catch (e) {}
-  outgoing.volume = vol;
-  releaseDeckLater(outgoing, 100);
+  stopDeckAntiPop(outgoing, () => releaseDeckLater(outgoing, 180));
 
   updateUIWithSong(song);
   updateMediaSession(song);
@@ -963,6 +1082,7 @@ async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
 
   clearHandoffTimers();
   state.isCrossfading = true;
+  await resumeAudioGraph();
 
   const outgoing = activeDeck;
   const incoming = inactiveDeck;
@@ -973,17 +1093,18 @@ async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
     incoming.readyState >= 2;
 
   if (!alreadyPreloaded) {
-    incoming.volume = 0;
+    setDeckVol(incoming, 0);
     incoming.src = nextSong.audioUrl;
     await waitDeckCanPlay(incoming);
   }
 
   try { incoming.currentTime = 0; } catch (e) {}
-  // Start muted; FX sets real volumes (avoids pop + accidental swell)
-  incoming.volume = 0;
+  setDeckVol(incoming, 0);
 
   try {
     await incoming.play();
+    // Keep very low until FX opens — prevents digital click on start
+    setDeckVol(incoming, 0.03);
   } catch (err) {
     console.warn('Auto handoff play error, fallback direct:', err);
     state.isCrossfading = false;
@@ -1059,8 +1180,10 @@ function togglePlayPause() {
     activeDeck.pause();
     state.isPlaying = false;
   } else {
-    activeDeck.play().then(() => {
+    resumeAudioGraph().then(() => activeDeck.play()).then(() => {
       state.isPlaying = true;
+      updatePlayPauseUI();
+      updateMediaSessionPlaybackState();
     }).catch(console.error);
   }
   updatePlayPauseUI();
@@ -2817,7 +2940,11 @@ function setupEventHandlers() {
   // Volume Bar
   volumeBar.addEventListener('input', (e) => {
     state.masterVolume = parseFloat(e.target.value);
-    activeDeck.volume = state.masterVolume;
+    setDeckVol(activeDeck, state.masterVolume);
+    // Keep inactive at master for next handoff (muted via 0 only during load)
+    if (inactiveDeck && !state.isCrossfading) {
+      setDeckVol(inactiveDeck, state.masterVolume);
+    }
   });
 
   // Cover Image Picker
@@ -3059,6 +3186,48 @@ async function seedDemoLibrary({ force = false } = {}) {
 // ==========================================
 // 13. INITIALIZATION
 // ==========================================
+function isIosDevice() {
+  const ua = navigator.userAgent || '';
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  // iPadOS 13+ desktop UA
+  return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+}
+
+function isRunningStandalone() {
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    window.navigator.standalone === true
+  );
+}
+
+/** Safari has no Chrome install button — teach Add to Home Screen once */
+function setupIosInstallHint() {
+  const sheet = document.getElementById('iosInstallSheet');
+  if (!sheet) return;
+  if (!isIosDevice() || isRunningStandalone()) return;
+  try {
+    if (localStorage.getItem('mm_ios_install_v1') === '1') return;
+  } catch (e) {}
+
+  const dismiss = () => {
+    sheet.classList.add('hidden');
+    try { localStorage.setItem('mm_ios_install_v1', '1'); } catch (e) {}
+  };
+
+  const closeBtn = document.getElementById('iosInstallClose');
+  const gotIt = document.getElementById('iosInstallGotIt');
+  if (closeBtn) closeBtn.addEventListener('click', dismiss);
+  if (gotIt) gotIt.addEventListener('click', dismiss);
+  sheet.addEventListener('click', (e) => {
+    if (e.target === sheet) dismiss();
+  });
+
+  setTimeout(() => {
+    if (isRunningStandalone()) return;
+    sheet.classList.remove('hidden');
+  }, 1600);
+}
+
 /** Keep Chrome "Cài đặt ứng dụng" / home-screen icon on the latest build automatically */
 function setupPwaAutoUpdate() {
   if (!('serviceWorker' in navigator)) return;
@@ -3228,8 +3397,18 @@ async function initApp() {
       }
     }
 
-    // Auto-update installed PWA ("Cài đặt ứng dụng") — no reinstall needed
+    // iOS Safari install guide + PWA auto-update
+    setupIosInstallHint();
     setupPwaAutoUpdate();
+
+    // Warm audio graph on first tap (iOS requires user gesture)
+    const warmAudio = () => {
+      resumeAudioGraph().catch(() => {});
+      document.removeEventListener('touchstart', warmAudio);
+      document.removeEventListener('click', warmAudio);
+    };
+    document.addEventListener('touchstart', warmAudio, { once: true, passive: true });
+    document.addEventListener('click', warmAudio, { once: true });
 
   } catch (err) {
     console.error('App init failed:', err);
