@@ -11,7 +11,7 @@ const DB_VERSION = 2;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 32;
+const APP_BUILD = 33;
 
 const state = {
   db: null,
@@ -3200,18 +3200,28 @@ function isRunningStandalone() {
   );
 }
 
-/** Safari has no Chrome install button — teach Add to Home Screen once */
+/** Safari has no Chrome install button — teach Add to Home Screen once.
+ *  Preview on PC: open index.html?iosGuide=1
+ */
 function setupIosInstallHint() {
   const sheet = document.getElementById('iosInstallSheet');
   if (!sheet) return;
-  if (!isIosDevice() || isRunningStandalone()) return;
-  try {
-    if (localStorage.getItem('mm_ios_install_v1') === '1') return;
-  } catch (e) {}
+
+  const params = new URLSearchParams(window.location.search);
+  const forcePreview = params.get('iosGuide') === '1' || params.get('ios') === '1';
+
+  if (!forcePreview) {
+    if (!isIosDevice() || isRunningStandalone()) return;
+    try {
+      if (localStorage.getItem('mm_ios_install_v1') === '1') return;
+    } catch (e) {}
+  }
 
   const dismiss = () => {
     sheet.classList.add('hidden');
-    try { localStorage.setItem('mm_ios_install_v1', '1'); } catch (e) {}
+    if (!forcePreview) {
+      try { localStorage.setItem('mm_ios_install_v1', '1'); } catch (e) {}
+    }
   };
 
   const closeBtn = document.getElementById('iosInstallClose');
@@ -3222,10 +3232,13 @@ function setupIosInstallHint() {
     if (e.target === sheet) dismiss();
   });
 
-  setTimeout(() => {
-    if (isRunningStandalone()) return;
+  const show = () => {
+    if (!forcePreview && isRunningStandalone()) return;
     sheet.classList.remove('hidden');
-  }, 1600);
+  };
+
+  // Preview: hiện ngay. iPhone thật: chờ 1.6s
+  setTimeout(show, forcePreview ? 200 : 1600);
 }
 
 /** Keep Chrome "Cài đặt ứng dụng" / home-screen icon on the latest build automatically */
