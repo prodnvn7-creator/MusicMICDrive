@@ -7,11 +7,11 @@
 // 1. STATE & CONSTANTS
 // ==========================================
 const DB_NAME = 'MusicMeltingDriveDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 33;
+const APP_BUILD = 34;
 
 const state = {
   db: null,
@@ -42,7 +42,7 @@ const state = {
 
 const nativeRefreshGate = {
   lastAt: 0,
-  minIntervalMs: 20000 // don't hammer MediaStore on rapid app switches
+  minIntervalMs: 90000 // avoid MediaStore thrash → heat / battery drain
 };
 
 function isNativeApk() {
@@ -322,31 +322,167 @@ function dbGetSetting(key) {
   });
 }
 
+/** Strip runtime/heavy fields — NEVER put GB of audioBlob into IndexedDB */
+function toStorableSong(song) {
+  if (!song) return null;
+  const coverOk = song.coverUrl && typeof song.coverUrl === 'string'
+    && !song.coverUrl.startsWith('blob:')
+    && song.coverUrl !== 'null';
+  return {
+    id: song.id,
+    title: song.title,
+    artist: song.artist,
+    album: song.album || 'Music MIC Driver',
+    duration: song.duration || 0,
+    fileName: song.fileName || '',
+    fileSize: song.fileSize || 0,
+    addedAt: song.addedAt || Date.now(),
+    isNative: !!song.isNative,
+    nativePath: song.nativePath || null,
+    nativeUri: song.nativeUri || null,
+    opfsName: song.opfsName || null,
+    fileHandle: song.fileHandle || null,
+    coverUrl: coverOk ? song.coverUrl : 'logo.png',
+    coverBlob: null,
+    audioBlob: null,
+    audioUrl: song.isNative ? (song.nativeUri || song.audioUrl || '') : '',
+    isDemo: !!song.isDemo,
+    _durationVerified: !!song._durationVerified
+  };
+}
+
 function dbAddSong(song) {
   return new Promise((resolve, reject) => {
+    if (!state.db) return reject(new Error('DB not ready'));
     const tx = state.db.transaction([STORE_NAME], 'readwrite');
     const store = tx.objectStore(STORE_NAME);
-    const req = store.put(song);
+    const req = store.put(toStorableSong(song));
     req.onsuccess = () => resolve(song);
     req.onerror = (e) => reject(e.target.error);
   });
 }
 
-function dbAddSongsBatch(songs) {
-  return new Promise((resolve) => {
-    if (!state.db || !songs || songs.length === 0) return resolve();
-    try {
-      const tx = state.db.transaction([STORE_NAME], 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      for (let i = 0; i < songs.length; i++) {
-        store.put(songs[i]);
+/** Chunked durable writes — surfaces QuotaExceeded instead of silent fail */
+async function dbAddSongsBatch(songs) {
+  if (!state.db || !songs || songs.length === 0) {
+    return { ok: 0, fail: 0, error: null };
+  }
+  let ok = 0;
+  let fail = 0;
+  let lastError = null;
+  const CHUNK = 40;
+  for (let i = 0; i < songs.length; i += CHUNK) {
+    const slice = songs.slice(i, i + CHUNK);
+    const result = await new Promise((resolve) => {
+      try {
+        const tx = state.db.transaction([STORE_NAME], 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        let chunkFail = 0;
+        for (let j = 0; j < slice.length; j++) {
+          const rec = toStorableSong(slice[j]);
+          try {
+            const req = store.put(rec);
+            req.onerror = () => { chunkFail++; };
+          } catch (e) {
+            chunkFail++;
+            lastError = e;
+          }
+        }
+        tx.oncomplete = () => resolve({ chunkFail });
+        tx.onerror = (e) => {
+          lastError = tx.error || (e && e.target && e.target.error) || lastError;
+          resolve({ chunkFail: slice.length });
+        };
+        tx.onabort = () => {
+          lastError = tx.error || lastError;
+          resolve({ chunkFail: slice.length });
+        };
+      } catch (e) {
+        lastError = e;
+        resolve({ chunkFail: slice.length });
       }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    } catch (e) {
-      resolve();
+    });
+    const chunkFail = result.chunkFail || 0;
+    fail += chunkFail;
+    ok += Math.max(0, slice.length - chunkFail);
+    await yieldToUI();
+  }
+  return { ok, fail, error: lastError };
+}
+
+async function requestPersistentStorage() {
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      await navigator.storage.persist();
     }
-  });
+  } catch (e) {}
+}
+
+async function opfsWriteTrack(id, blob) {
+  if (!navigator.storage || !navigator.storage.getDirectory) {
+    throw new Error('OPFS unavailable');
+  }
+  const root = await navigator.storage.getDirectory();
+  const dir = await root.getDirectoryHandle('mm_tracks', { create: true });
+  const name = String(id).replace(/[^\w.-]+/g, '_') + '.bin';
+  const fh = await dir.getFileHandle(name, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(blob);
+  await writable.close();
+  return name;
+}
+
+async function opfsReadTrack(name) {
+  const root = await navigator.storage.getDirectory();
+  const dir = await root.getDirectoryHandle('mm_tracks', { create: false });
+  const fh = await dir.getFileHandle(name, { create: false });
+  return fh.getFile();
+}
+
+/** Resolve a playable URL without keeping every track decoded in RAM */
+async function ensureSongPlayable(song) {
+  if (!song) return null;
+  if (song.isNative) {
+    if (song.nativePath && window.Capacitor && window.Capacitor.convertFileSrc) {
+      song.audioUrl = window.Capacitor.convertFileSrc(song.nativePath);
+    } else if (song.nativeUri) {
+      song.audioUrl = song.nativeUri;
+    }
+    return song.audioUrl || null;
+  }
+  if (song._objectUrl) return song._objectUrl;
+
+  try {
+    if (song.fileHandle && typeof song.fileHandle.getFile === 'function') {
+      try {
+        const perm = await song.fileHandle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted') {
+          const next = await song.fileHandle.requestPermission({ mode: 'read' });
+          if (next !== 'granted') throw new Error('permission denied');
+        }
+      } catch (e) {
+        // Older engines may not support queryPermission
+      }
+      const file = await song.fileHandle.getFile();
+      song._objectUrl = URL.createObjectURL(file);
+      song.audioUrl = song._objectUrl;
+      return song._objectUrl;
+    }
+    if (song.opfsName) {
+      const file = await opfsReadTrack(song.opfsName);
+      song._objectUrl = URL.createObjectURL(file);
+      song.audioUrl = song._objectUrl;
+      return song._objectUrl;
+    }
+    if (song.audioBlob instanceof Blob) {
+      song._objectUrl = URL.createObjectURL(song.audioBlob);
+      song.audioUrl = song._objectUrl;
+      return song._objectUrl;
+    }
+  } catch (e) {
+    console.warn('ensureSongPlayable failed', song && song.id, e);
+  }
+  return song.audioUrl || null;
 }
 
 function dbGetAllSongs() {
@@ -1016,9 +1152,15 @@ async function playSongById(id, _withCrossfade = false) {
  * Instant skip — no DJ FX. Soft open/close so Next không còn bụp.
  */
 async function directPlaybackTransition(song) {
-  if (!song || !song.audioUrl) return;
+  if (!song) return;
   stopFadeEngine();
   await resumeAudioGraph();
+
+  const playUrl = await ensureSongPlayable(song);
+  if (!playUrl) {
+    showToast('Không mở được file nhạc (thiếu quyền hoặc đã mất bản lưu)', '⚠️');
+    return;
+  }
 
   const outgoing = activeDeck;
   const incoming = inactiveDeck;
@@ -1029,7 +1171,7 @@ async function directPlaybackTransition(song) {
 
   try { incoming.pause(); } catch (e) {}
   setDeckVol(incoming, 0);
-  incoming.src = song.audioUrl;
+  incoming.src = playUrl;
   await waitDeckCanPlay(incoming);
   try { incoming.currentTime = 0; } catch (e) {}
 
@@ -1039,7 +1181,7 @@ async function directPlaybackTransition(song) {
     console.warn('Direct play error (requires user touch interaction):', err);
     try {
       stopDeckAntiPop(outgoing);
-      outgoing.src = song.audioUrl;
+      outgoing.src = playUrl;
       await playDeckAntiPop(outgoing, vol);
       activeDeck = outgoing;
       state.isPlaying = true;
@@ -1071,8 +1213,14 @@ async function directPlaybackTransition(song) {
  * Ordered playlist: near-gapless cut. Manual next never calls this.
  */
 async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
-  if (!nextSong || !nextSong.audioUrl) return;
+  if (!nextSong) return;
   if (document.hidden) {
+    await directPlaybackTransition(nextSong);
+    return;
+  }
+
+  const playUrl = await ensureSongPlayable(nextSong);
+  if (!playUrl) {
     await directPlaybackTransition(nextSong);
     return;
   }
@@ -1094,7 +1242,7 @@ async function performAutoSeamlessHandoff(nextSong, fromSong = null) {
 
   if (!alreadyPreloaded) {
     setDeckVol(incoming, 0);
-    incoming.src = nextSong.audioUrl;
+    incoming.src = playUrl;
     await waitDeckCanPlay(incoming);
   }
 
@@ -1227,14 +1375,17 @@ function setupDeckEvents(deck) {
       if (timeLeft <= preloadAt && timeLeft > handoffAt + 0.35) {
         promoteCompatibleNext(currentSong);
         const upcoming = getNextSong();
-        if (upcoming && upcoming.audioUrl && state.nextPreloadedId !== upcoming.id) {
-          try {
-            inactiveDeck.volume = 0;
-            inactiveDeck.src = upcoming.audioUrl;
-            inactiveDeck.preload = 'auto';
-            inactiveDeck.load();
-            state.nextPreloadedId = upcoming.id;
-          } catch (e) {}
+        if (upcoming && state.nextPreloadedId !== upcoming.id) {
+          ensureSongPlayable(upcoming).then((url) => {
+            if (!url || state.nextPreloadedId === upcoming.id) return;
+            try {
+              setDeckVol(inactiveDeck, 0);
+              inactiveDeck.src = url;
+              inactiveDeck.preload = 'auto';
+              inactiveDeck.load();
+              state.nextPreloadedId = upcoming.id;
+            } catch (e) {}
+          }).catch(() => {});
         }
       }
 
@@ -1306,10 +1457,16 @@ function setupDeckEvents(deck) {
 setupDeckEvents(deckA);
 setupDeckEvents(deckB);
 
-// Page Visibility — cut GPU work in background; APK light-scan on resume
+// Page Visibility — cut GPU/Audio work in background; APK light-scan on resume
 document.addEventListener('visibilitychange', () => {
   document.body.classList.toggle('app-hidden', document.hidden);
-  if (!document.hidden && isNativeApk()) {
+  if (document.hidden) {
+    try {
+      if (audioGraph && audioGraph.ctx && audioGraph.ctx.state === 'running' && !state.isPlaying) {
+        audioGraph.ctx.suspend();
+      }
+    } catch (e) {}
+  } else if (isNativeApk()) {
     refreshNativeLibrarySilent();
   }
 });
@@ -1486,31 +1643,35 @@ const SKIP_SCAN_DIRS = new Set([
   'lost+found', 'notifications', 'alarms', 'ringtones', 'ui', 'fonts', 'log', 'logs'
 ]);
 
-// Deep recursive directory reader (showDirectoryPicker API) — full phone storage
+// Deep recursive directory reader — returns { file, handle } for durable re-open
 async function scanDirectoryRecursively(dirHandle, onProgress) {
-  const files = [];
+  const items = [];
+  let visited = 0;
   async function traverse(handle, depth) {
     for await (const entry of handle.values()) {
+      visited++;
+      if (visited % 40 === 0) await yieldToUI();
       if (entry.kind === 'file') {
         try {
           const file = await entry.getFile();
           if (isAudioFile(file)) {
-            files.push(file);
-            if (onProgress && (files.length % 12 === 0)) onProgress(files.length);
+            items.push({ file, handle: entry });
+            if (onProgress && (items.length % 10 === 0)) onProgress(items.length);
           }
         } catch (e) { /* skip locked files */ }
       } else if (entry.kind === 'directory') {
         const name = (entry.name || '').toLowerCase();
-        // Skip heavy system folders when scanning from storage root (keeps Music/Download/Zalo)
         if (depth === 0 && SKIP_SCAN_DIRS.has(name)) continue;
         if (name.startsWith('.') && name !== '.music') continue;
+        // Cap depth to avoid endless trees / heat
+        if (depth >= 8) continue;
         try { await traverse(entry, depth + 1); } catch (e) { /* skip inaccessible dirs */ }
       }
     }
   }
   await traverse(dirHandle, 0);
-  if (onProgress) onProgress(files.length);
-  return files;
+  if (onProgress) onProgress(items.length);
+  return items;
 }
 
 /**
@@ -1737,8 +1898,9 @@ async function fastGetAudioDuration(file) {
 
 
 /**
- * Ultra-fast import: no per-file header await in the hot path.
- * Duration is estimated instantly, then repaired in background.
+ * Import audio — durable persistence:
+ * - File System Access handle → lưu handle (nhẹ, mở lại được)
+ * - File input thuần → copy OPFS (không nhét GB vào IndexedDB)
  */
 async function handleAudioFiles(files) {
   if (!files || files.length === 0) {
@@ -1746,73 +1908,70 @@ async function handleAudioFiles(files) {
     return;
   }
 
+  await requestPersistentStorage();
+
   if (!scanProgressOverlay || scanProgressOverlay.classList.contains('hidden')) {
     beginPhoneScanProgress('Đang lọc file nhạc trên máy…');
   }
 
-  // ── Step 1: Audio detection with 3-layer fallback ──────────
-  let validFiles = Array.from(files).filter(f => isAudioFile(f));
+  const raw = Array.from(files);
+  const items = raw.map((x) => {
+    if (x && x.file instanceof Blob) return { file: x.file, handle: x.handle || null };
+    return { file: x, handle: null };
+  }).filter((x) => x.file);
 
-  if (validFiles.length === 0) {
-    validFiles = Array.from(files).filter(f => {
-      const name = (f.name || '').toLowerCase();
-      return SUPPORTED_AUDIO_EXTENSIONS.some(ext => name.endsWith(ext));
+  let validItems = items.filter((x) => isAudioFile(x.file));
+  if (validItems.length === 0) {
+    validItems = items.filter((x) => {
+      const name = (x.file.name || '').toLowerCase();
+      return SUPPORTED_AUDIO_EXTENSIONS.some((ext) => name.endsWith(ext));
     });
   }
-
-  if (validFiles.length === 0) {
-    const SKIP = ['.jpg','.jpeg','.png','.gif','.webp','.bmp','.pdf','.txt','.doc','.docx','.xls','.xlsx','.zip','.apk','.exe','.xml','.json'];
-    validFiles = Array.from(files).filter(f => {
-      const n = (f.name || '').toLowerCase();
-      return n.length > 0 && !SKIP.some(ext => n.endsWith(ext));
-    });
-  }
-
-  if (validFiles.length === 0) {
+  if (validItems.length === 0) {
     abortScanProgress();
     showToast('Không tìm thấy file nhạc nào', '⚠️');
     return;
   }
 
   const existingKeys = new Set(
-    state.songs.map(s => `${s.fileName}__${s.fileSize || 0}`)
+    state.songs.map((s) => `${s.fileName}__${s.fileSize || 0}`)
   );
-
   const seen = new Set();
-  const uniqueFiles = [];
-  for (let i = 0; i < validFiles.length; i++) {
-    const file = validFiles[i];
+  const uniqueItems = [];
+  for (let i = 0; i < validItems.length; i++) {
+    const file = validItems[i].file;
     const key = `${file.name}__${file.size}`;
     if (seen.has(key) || existingKeys.has(key)) continue;
-    // Near-dup by name+size tolerance
     let dup = false;
-    for (const s of state.songs) {
-      if (s.fileName === file.name && Math.abs((s.fileSize || 0) - file.size) < 512) {
+    for (let s = 0; s < state.songs.length; s++) {
+      const song = state.songs[s];
+      if (song.fileName === file.name && Math.abs((song.fileSize || 0) - file.size) < 512) {
         dup = true;
         break;
       }
     }
     if (dup) continue;
     seen.add(key);
-    uniqueFiles.push(file);
+    uniqueItems.push(validItems[i]);
   }
 
-  if (uniqueFiles.length === 0) {
+  if (uniqueItems.length === 0) {
     abortScanProgress();
-    showToast(`Tất cả ${validFiles.length} bài đã có trong thư viện`, '✅');
+    showToast(`Tất cả ${validItems.length} bài đã có trong thư viện`, '✅');
     return;
   }
 
-  const total = uniqueFiles.length;
-  showScanProgress(total, 'Đang nạp nhạc vào thư viện');
+  const total = uniqueItems.length;
+  showScanProgress(total, 'Đang lưu thư viện (bền vững)…');
 
   const baseTs = Date.now();
   const newSongs = [];
+  let persistFails = 0;
+  const canOpfs = !!(navigator.storage && navigator.storage.getDirectory);
 
-  for (let i = 0; i < uniqueFiles.length; i++) {
-    const file = uniqueFiles[i];
+  for (let i = 0; i < uniqueItems.length; i++) {
+    const { file, handle } = uniqueItems[i];
     const songId = 'mm_' + baseTs + '_' + i + '_' + Math.random().toString(36).substring(2, 6);
-    const audioUrl = URL.createObjectURL(file);
 
     let title = file.name.replace(/\.[^/.]+$/, '');
     let artist = 'Music MIC Driver';
@@ -1822,8 +1981,22 @@ async function handleAudioFiles(files) {
       title = parts.slice(1).join(' - ').trim();
     }
 
-    // Instant size estimate — accurate duration fixed in background
     const duration = Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
+    let opfsName = null;
+    let fileHandle = handle || null;
+
+    // Prefer handle (no copy). Else OPFS copy so reopen still works.
+    if (!fileHandle && canOpfs) {
+      try {
+        opfsName = await opfsWriteTrack(songId, file);
+      } catch (e) {
+        persistFails++;
+        console.warn('OPFS write fail', e);
+      }
+    }
+
+    // Temporary blob URL for this session only (not stored in IDB)
+    const audioUrl = URL.createObjectURL(file);
 
     newSongs.push({
       id: songId,
@@ -1831,27 +2004,36 @@ async function handleAudioFiles(files) {
       artist,
       album: 'Music MIC Driver',
       duration,
-      audioBlob: file,
+      audioBlob: null,
       audioUrl,
+      _objectUrl: audioUrl,
+      fileHandle,
+      opfsName,
       coverBlob: null,
       coverUrl: 'logo.png',
       fileName: file.name,
       fileSize: file.size,
-      addedAt: baseTs + (total - i) * 10
+      addedAt: baseTs + (total - i) * 10,
+      _durationVerified: false
     });
 
-    if (i % 25 === 0 || i === total - 1) {
+    if (i % 8 === 0 || i === total - 1) {
       updateScanProgress(i + 1, total, title);
       await yieldToUI();
     }
   }
 
-  updateScanProgress(total, total, 'Đang lưu vào máy…');
-  await dbAddSongsBatch(newSongs);
+  updateScanProgress(total, total, 'Đang ghi danh sách vào máy…');
+  const saveResult = await dbAddSongsBatch(newSongs);
+  if (saveResult.fail > 0 || (saveResult.error && saveResult.ok === 0)) {
+    showToast('Lưu thư viện lỗi — thiếu dung lượng hoặc trình duyệt chặn lưu', '⚠️');
+  } else if (persistFails > 0 && !uniqueItems.some((x) => x.handle)) {
+    showToast(`Có ${persistFails} bài chưa ghi được ổ tạm — có thể mất khi thoát app`, '⚠️');
+  }
 
   state.songs = [
     ...newSongs,
-    ...state.songs.filter(s => !newSongs.some(ns => ns.id === s.id))
+    ...state.songs.filter((s) => !newSongs.some((ns) => ns.id === s.id))
   ];
   state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
   invalidateSongMap();
@@ -1865,7 +2047,9 @@ async function handleAudioFiles(files) {
   }
 
   hideScanProgress(newSongs.length, total);
-  repairDurationsInBackground(newSongs).catch(() => {});
+  if (saveResult.ok > 0) {
+    showToast(`Đã lưu ${saveResult.ok} bài — thoát app vẫn còn`, '💾');
+  }
 }
 
 /**
@@ -1873,26 +2057,33 @@ async function handleAudioFiles(files) {
  * Eliminates background CPU thrashing, phone heating, and UI lag.
  */
 function enrichCurrentSongID3(song) {
-  if (!song || song._enriched || !song.audioBlob) return;
+  if (!song || song._enriched) return;
   song._enriched = true;
 
-  // Verify duration via audio element (most accurate for real files)
-  if (!song._durationVerified && (song.audioBlob || song.audioUrl)) {
-    probeDurationWithAudio(song.audioBlob || song.audioUrl).then(dur => {
-      song._durationVerified = true;
-      if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
-        song.duration = dur;
-        dbAddSong(song).catch(() => {});
-        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
-        if (mono) mono.textContent = formatTime(dur, '--:--');
-      }
+  // Duration: only for current track, once — never whole-library probe (heat)
+  if (!song._durationVerified) {
+    ensureSongPlayable(song).then((url) => {
+      if (!url) return;
+      probeDurationWithAudio(url).then((dur) => {
+        song._durationVerified = true;
+        if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
+          song.duration = dur;
+          dbAddSong(song).catch(() => {});
+          const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+          if (mono) mono.textContent = formatTime(dur, '--:--');
+        }
+      }).catch(() => {});
     }).catch(() => {});
   }
 
   if (!window.jsmediatags) return;
 
+  // ID3 only when we still have a Blob in-session (handles/OPFS skip heavy tag decode)
+  const blobSrc = song.audioBlob;
+  if (!(blobSrc instanceof Blob)) return;
+
   try {
-    window.jsmediatags.read(song.audioBlob, {
+    window.jsmediatags.read(blobSrc, {
       onSuccess: async (tag) => {
         const tags = tag.tags || {};
         let changed = false;
@@ -2700,12 +2891,13 @@ function setupEventHandlers() {
       try {
         beginPhoneScanProgress('Chọn Bộ nhớ trong / thẻ nhớ để quét cả máy…');
         const dirHandle = await window.showDirectoryPicker();
+        try { await dbSaveSetting('libraryDirHandle', dirHandle); } catch (e) {}
         beginPhoneScanProgress('Đang quét toàn bộ thư mục trên máy…');
-        const files = await scanDirectoryRecursively(dirHandle, (found) => {
+        const items = await scanDirectoryRecursively(dirHandle, (found) => {
           updateScanDiscoverCount(found);
         });
-        if (files.length > 0) {
-          await handleAudioFiles(files);
+        if (items.length > 0) {
+          await handleAudioFiles(items);
         } else {
           abortScanProgress();
           showToast('Không tìm thấy file âm thanh trong thư mục này', '⚠️');
@@ -3332,51 +3524,43 @@ function setupPwaAutoUpdate() {
 async function initApp() {
   try {
     await initDB();
+    await requestPersistentStorage();
     const storedSongs = await dbGetAllSongs();
     const urlParams = new URLSearchParams(window.location.search);
     const demoMode = urlParams.get('demo') === '1' || urlParams.get('demo') === 'true';
     const demoReset = urlParams.get('reset') === '1';
 
-    // Reconstruct audio URLs and cover URLs from stored Blobs or Native device paths
-    let hasUpdatedDurations = false;
-    state.songs = storedSongs.map(s => {
-      let audioUrl = s.audioUrl || '';
-      if (s.isNative && s.nativePath && window.Capacitor && window.Capacitor.convertFileSrc) {
-        audioUrl = window.Capacitor.convertFileSrc(s.nativePath);
-      } else if (s.audioBlob instanceof Blob) {
-        audioUrl = URL.createObjectURL(s.audioBlob);
-      }
-
-      let coverUrl = s.coverUrl || 'logo.png';
-      if (s.coverBlob instanceof Blob) {
-        coverUrl = URL.createObjectURL(s.coverBlob);
-      } else if (typeof s.coverBlob === 'string' && s.coverBlob.length > 0) {
-        coverUrl = s.coverBlob;
-      }
-
+    // Metadata only on boot — NO createObjectURL for whole library (was heating phones)
+    state.songs = storedSongs.map((s) => {
       let duration = (typeof s.duration === 'number' && s.duration > 0) ? s.duration : 0;
       if (duration <= 0 && s.fileSize > 0) {
         duration = Math.max(15, Math.round((s.fileSize * 8) / (160 * 1000)));
-        hasUpdatedDurations = true;
       }
-
+      let audioUrl = '';
+      if (s.isNative) {
+        if (s.nativePath && window.Capacitor && window.Capacitor.convertFileSrc) {
+          audioUrl = window.Capacitor.convertFileSrc(s.nativePath);
+        } else {
+          audioUrl = s.nativeUri || s.audioUrl || '';
+        }
+      }
+      const coverUrl = (s.coverUrl && !String(s.coverUrl).startsWith('blob:'))
+        ? s.coverUrl
+        : 'logo.png';
       return {
         ...s,
         duration,
         audioUrl,
-        coverUrl
+        coverUrl,
+        audioBlob: null,
+        coverBlob: null,
+        _objectUrl: null
       };
     });
 
-    if (hasUpdatedDurations) {
-      dbAddSongsBatch(state.songs).catch(() => {});
-    }
-
-    // Sắp xếp bài mới nạp lên trước, bài cũ sau
     state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     invalidateSongMap();
 
-    // Seed demo BEFORE first paint so phone preview never flashes empty state
     if (demoMode) {
       await seedDemoLibrary({ force: demoReset || state.songs.length === 0 });
     }
@@ -3386,35 +3570,36 @@ async function initApp() {
     updateLibraryBadges();
     setupEventHandlers();
 
-    if (demoMode && state.songs.some(s => s.isDemo)) {
-      showToast('Đã nạp ' + state.songs.filter(s => s.isDemo).length + ' bài demo để xem UI', '✨');
-    }
-
-    // Fix wrong durations for previously imported real tracks
-    if (!demoMode && state.songs.length > 0) {
-      repairDurationsInBackground(state.songs).catch(() => {});
+    if (demoMode && state.songs.some((s) => s.isDemo)) {
+      showToast('Đã nạp ' + state.songs.filter((s) => s.isDemo).length + ' bài demo để xem UI', '✨');
     }
 
     if (state.songs.length > 0) {
       state.currentIndex = 0;
       updateUIWithSong(state.songs[0]);
+      showToast(`Thư viện: ${state.songs.length} bài (đã khôi phục)`, '💾');
+    } else if (!demoMode) {
+      // Try restore from previously granted folder (Chrome/Android PWA)
+      try {
+        const dirHandle = await dbGetSetting('libraryDirHandle');
+        if (dirHandle && dirHandle.values) {
+          showToast('Chạm Quét để khôi phục từ thư mục đã chọn', '📁');
+        }
+      } catch (e) {}
     }
 
-    // APK: auto MediaStore — full UI scan if empty, silent delta-refresh if library exists
+    // APK: MediaStore — empty → scan once; else rare silent delta only
     if (isNativeApk()) {
       setupNativeAutoRefresh();
       if (state.songs.length === 0) {
-        setTimeout(() => { scanAllAudioNative(); }, 500);
-      } else {
-        setTimeout(() => { refreshNativeLibrarySilent(); }, 700);
+        setTimeout(() => { scanAllAudioNative(); }, 800);
       }
+      // Do NOT silent-scan every launch — was a major heat source
     }
 
-    // iOS Safari install guide + PWA auto-update
     setupIosInstallHint();
     setupPwaAutoUpdate();
 
-    // Warm audio graph on first tap (iOS requires user gesture)
     const warmAudio = () => {
       resumeAudioGraph().catch(() => {});
       document.removeEventListener('touchstart', warmAudio);
@@ -3425,6 +3610,7 @@ async function initApp() {
 
   } catch (err) {
     console.error('App init failed:', err);
+    showToast('Lỗi khởi động thư viện — thử Quét lại', '⚠️');
   }
 }
 
