@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 40;
+const APP_BUILD = 41;
 
 const state = {
   db: null,
@@ -1987,28 +1987,24 @@ async function fastGetAudioDuration(file) {
  * - Không tạo blob URL hàng loạt khi quét (tránh lag/RAM)
  */
 async function handleAudioFiles(files) {
-  if (!files || files.length === 0) {
-    abortScanProgress();
-    return;
-  }
+  // SNAPSHOT FIRST — before any await. Android Chrome empties live FileList when
+  // <input value=""> is cleared right after change (files become 0 / mất tên .mp3).
+  const items = Array.from(files || []).map((x) => {
+    if (x && x.file instanceof Blob) return { file: x.file, handle: x.handle || null };
+    return { file: x, handle: null };
+  }).filter((x) => x.file && ((x.file.size > 0) || (x.file.name && String(x.file.name).length > 0)));
 
-  await requestPersistentStorage();
-
-  if (!scanProgressOverlay || scanProgressOverlay.classList.contains('hidden')) {
-    beginPhoneScanProgress('Đang lọc file nhạc trên máy…');
-  }
-
-  const raw = Array.from(files || []);
-  if (raw.length === 0) {
+  if (items.length === 0) {
     abortScanProgress();
     showToast('Bạn chưa chọn file nào', '⚠️');
     return;
   }
 
-  const items = raw.map((x) => {
-    if (x && x.file instanceof Blob) return { file: x.file, handle: x.handle || null };
-    return { file: x, handle: null };
-  }).filter((x) => x.file && (x.file.size > 0 || x.file.name));
+  if (!scanProgressOverlay || scanProgressOverlay.classList.contains('hidden')) {
+    beginPhoneScanProgress(`Đã chọn ${items.length} file — đang thêm…`);
+  }
+
+  await requestPersistentStorage();
 
   // Pass 1: name/MIME. Pass 2: sniff headers (Android often strips .mp3)
   let validItems = items.filter((x) => isAudioFile(x.file));
@@ -3300,45 +3296,49 @@ function setupEventHandlers() {
     });
   }
 
+  function takePickedFiles(input) {
+    if (!input || !input.files || input.files.length === 0) return [];
+    const picked = Array.from(input.files);
+    try { input.value = ''; } catch (e) {}
+    return picked;
+  }
+
   if (scanAudioInput) {
     scanAudioInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        handleAudioFiles(e.target.files);
-        scanAudioInput.value = '';
-      }
+      const picked = takePickedFiles(e.target);
+      if (picked.length > 0) handleAudioFiles(picked);
     });
   }
 
   if (scanFolderInput) {
     scanFolderInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        beginPhoneScanProgress(`Đã chọn ${e.target.files.length} file — đang lọc nhạc…`);
-        handleAudioFiles(e.target.files);
-        scanFolderInput.value = '';
+      const picked = takePickedFiles(e.target);
+      if (picked.length > 0) {
+        beginPhoneScanProgress(`Đã chọn ${picked.length} file — đang lọc nhạc…`);
+        handleAudioFiles(picked);
       } else {
         abortScanProgress();
       }
     });
-    // User cancelled system picker (focus returns with no files)
     scanFolderInput.addEventListener('cancel', () => abortScanProgress());
   }
 
   if (freeFileInput) {
     freeFileInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        beginPhoneScanProgress(`Đang nạp ${e.target.files.length} file…`);
-        handleAudioFiles(e.target.files);
-        freeFileInput.value = '';
+      const picked = takePickedFiles(e.target);
+      if (picked.length > 0) {
+        beginPhoneScanProgress(`Đang nạp ${picked.length} file…`);
+        handleAudioFiles(picked);
       }
     });
   }
 
   if (downloadsFileInput) {
     downloadsFileInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        beginPhoneScanProgress(`Đang nạp ${e.target.files.length} file từ máy…`);
-        handleAudioFiles(e.target.files);
-        downloadsFileInput.value = '';
+      const picked = takePickedFiles(e.target);
+      if (picked.length > 0) {
+        beginPhoneScanProgress(`Đang nạp ${picked.length} file từ máy…`);
+        handleAudioFiles(picked);
       } else {
         abortScanProgress();
       }
