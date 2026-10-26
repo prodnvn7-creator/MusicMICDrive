@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 38;
+const APP_BUILD = 39;
 
 const state = {
   db: null,
@@ -384,9 +384,9 @@ async function dbAddSongsBatch(songs) {
   for (let i = 0; i < songs.length; i += CHUNK) {
     const slice = songs.slice(i, i + CHUNK);
     const result = await new Promise((resolve) => {
-      try {
-        const tx = state.db.transaction([STORE_NAME], 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
+    try {
+      const tx = state.db.transaction([STORE_NAME], 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
         let chunkFail = 0;
         for (let j = 0; j < slice.length; j++) {
           const rec = toStorableSong(slice[j]);
@@ -407,7 +407,7 @@ async function dbAddSongsBatch(songs) {
           lastError = tx.error || lastError;
           resolve({ chunkFail: slice.length });
         };
-      } catch (e) {
+    } catch (e) {
         lastError = e;
         resolve({ chunkFail: slice.length });
       }
@@ -1063,7 +1063,7 @@ function rebuildQueue(preserveCurrent = true) {
   if (state.isShuffle) {
     // Seamless Smart Shuffle: random path, tempo-linked neighbors
     state.queue = buildSeamlessShuffleQueue(allIds, preserveCurrent ? currentSongId : currentSongId);
-    state.currentIndex = 0;
+      state.currentIndex = 0;
   } else {
     state.queue = [...allIds];
     state.currentIndex = currentSongId ? state.queue.indexOf(currentSongId) : 0;
@@ -1199,15 +1199,15 @@ async function directPlaybackTransition(song) {
       outgoing.src = playUrl;
       await playDeckAntiPop(outgoing, vol);
       activeDeck = outgoing;
-      state.isPlaying = true;
+    state.isPlaying = true;
       updateUIWithSong(song);
       updateMediaSession(song);
-      updatePlayPauseUI();
-      updateMediaSessionPlaybackState();
+    updatePlayPauseUI();
+    updateMediaSessionPlaybackState();
     } catch (e2) {
-      state.isPlaying = false;
-      updatePlayPauseUI();
-    }
+    state.isPlaying = false;
+    updatePlayPauseUI();
+  }
     return;
   }
 
@@ -1327,7 +1327,7 @@ function handlePrev() {
   state.currentIndex = (state.currentIndex - 1 + state.queue.length) % state.queue.length;
   state.nextPreloadedId = null;
   // Always instant on prev
-  directPlaybackTransition(prevSong);
+    directPlaybackTransition(prevSong);
 }
 
 function togglePlayPause() {
@@ -1406,15 +1406,15 @@ function setupDeckEvents(deck) {
 
       if (timeLeft <= handoffAt && timeLeft > 0.05) {
         promoteCompatibleNext(currentSong);
-        const nextSong = getNextSong();
-        if (nextSong) {
-          state.currentIndex = (state.currentIndex + 1) % state.queue.length;
+          const nextSong = getNextSong();
+          if (nextSong) {
+            state.currentIndex = (state.currentIndex + 1) % state.queue.length;
           state._refinedSongId = null;
           // Keep nextPreloadedId so handoff can reuse buffer
           performAutoSeamlessHandoff(nextSong, currentSong);
+          }
         }
       }
-    }
   });
 
   // Track ended — backup if handoff didn't fire
@@ -1511,7 +1511,7 @@ function bindMediaSessionHandlersOnce() {
   navigator.mediaSession.setActionHandler('seekforward', (details) => {
     const skipTime = details.seekOffset || 10;
     if (activeDeck.duration) {
-      activeDeck.currentTime = Math.min(activeDeck.currentTime + skipTime, activeDeck.duration);
+    activeDeck.currentTime = Math.min(activeDeck.currentTime + skipTime, activeDeck.duration);
     }
   });
 }
@@ -1756,51 +1756,51 @@ function probeDurationWithAudio(src) {
 }
 
 async function repairDurationsInBackground(songs) {
-  // Missing OR inflated (50–80 phút) — probe real length when playable
+  // Inflated 36–80 phút OR missing — resolve via handle/OPFS then HTMLAudio probe
   const list = (songs || []).filter((s) => {
     if (!s || s.isDemo) return false;
-    const playable = !!(s.audioBlob || s.audioUrl || s.nativeUri);
-    if (!playable) return false;
+    const canOpen = !!(s.audioBlob || s.audioUrl || s.nativeUri || s.fileHandle || s.opfsName || s._sessionFile);
+    if (!canOpen) return false;
     if (!(s.duration > 1)) return true;
+    if (s.duration > 12 * 60 && !s._durationVerified) return true;
     if (durationLooksBogus(s.duration, s.fileSize)) return true;
-    if (s.duration > 20 * 60 && (s.fileSize || 0) > 0 && (s.fileSize || 0) < 12 * 1024 * 1024) return true;
-    return !s._durationVerified && !(s.duration > 1);
-  }).slice(0, 40);
+    return false;
+  }).slice(0, 60);
   if (list.length === 0) return;
 
+  let uiDirty = false;
   for (let i = 0; i < list.length; i++) {
     while (document.hidden) {
       await new Promise((r) => setTimeout(r, 800));
     }
     const song = list[i];
     if (!song) continue;
-    const src = song.audioBlob || song.audioUrl || song.nativeUri;
-    const dur = await probeDurationWithAudio(src);
-    if (dur > 0 && dur < 3 * 3600) {
+
+    let dur = 0;
+    try {
+      const src = await ensureSongPlayable(song);
+      if (src) dur = await probeDurationWithAudio(src);
+    } catch (e) {}
+
+    if (dur > 0 && dur < 45 * 60) {
       song._durationVerified = true;
       if (Math.abs((song.duration || 0) - dur) > 1) {
         song.duration = dur;
+        uiDirty = true;
         try { await dbAddSong(song); } catch (e) {}
-        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
-        if (mono) mono.textContent = formatTime(dur, '--:--', song.fileSize);
-        const current = getCurrentSong();
-        if (current && current.id === song.id && remainingTimeDisplay) {
-          const left = Math.max(0, dur - (activeDeck.currentTime || 0));
-          remainingTimeDisplay.textContent = '-' + formatTime(left);
-        }
       }
     } else {
       const fixed = sanitizeSongDuration(song.duration, song.fileSize);
       if (fixed > 0 && Math.abs(fixed - (song.duration || 0)) > 1) {
         song.duration = fixed;
         song._durationVerified = false;
+        uiDirty = true;
         try { await dbAddSong(song); } catch (e) {}
-        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
-        if (mono) mono.textContent = formatTime(fixed, '--:--', song.fileSize);
       }
     }
-    if (i % 2 === 1) await new Promise((r) => setTimeout(r, 120));
+    if (i % 2 === 1) await new Promise((r) => setTimeout(r, 80));
   }
+  if (uiDirty) renderTrackList();
 }
 
 /**
@@ -2245,12 +2245,12 @@ function enrichCurrentSongID3(song) {
       if (!url) return;
       probeDurationWithAudio(url).then((dur) => {
         song._durationVerified = true;
-        if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
-          song.duration = dur;
-          dbAddSong(song).catch(() => {});
+      if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
+        song.duration = dur;
+        dbAddSong(song).catch(() => {});
           const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
           if (mono) mono.textContent = formatTime(dur, '--:--');
-        }
+      }
       }).catch(() => {});
     }).catch(() => {});
   }
@@ -2455,7 +2455,7 @@ function renderQueueList() {
   const currentSong = getCurrentSong();
   const upcomingQueue = state.queue.slice(state.currentIndex + 1);
 
-  queueSubtitle.textContent = state.isShuffle
+  queueSubtitle.textContent = state.isShuffle 
     ? `Seamless Mix • tự lọc tempo • Còn ${upcomingQueue.length} bài`
     : `Theo thứ tự • Còn ${upcomingQueue.length} bài tiếp theo`;
 
@@ -2861,13 +2861,13 @@ function normalizeDurationSeconds(raw) {
 
 function estimateDurationFromSize(fileSize) {
   if (!fileSize || fileSize <= 0) return 0;
-  // ~192 kbps — lower bitrate made 3–5MB files look like 50–80 phút
+  // ~192 kbps — 8kbps guess made 3–5MB files look like 50–80 phút (×24)
   return Math.max(1, Math.round((fileSize * 8) / (192 * 1000)));
 }
 
 /**
- * Fix wrong list times: 2–3 phút songs stored/shown as 50–80 phút.
- * Uses file size when header/MediaStore left a inflated second-count.
+ * Fix list times like 53:19 / 80:34 that are really ~2–3 phút.
+ * Root cause: duration estimated at ~8 kbps instead of ~192 (factor ≈ 24).
  */
 function sanitizeSongDuration(raw, fileSize) {
   const original = Number(raw);
@@ -2877,14 +2877,29 @@ function sanitizeSongDuration(raw, fileSize) {
 
   if (!(d > 0)) return est || 0;
 
-  if (est > 0) {
-    // Classic bug: ~3 phút file, stored ~3000–5000 giây
-    if (d > 12 * 60 && est <= 15 * 60 && d > est * 1.8) return est;
-    if (d > est * 2.2 && d > 6 * 60) return est;
-    if (d > 20 * 60 && est <= 18 * 60) return est;
-  } else if (d > 90 * 60) {
-    // No size — try one more ms-style collapse if it yields a sane song length
-    const collapsed = Math.round((Number.isFinite(original) && original >= 10000 ? original : d) / 1000);
+  if (size > 80000 && d > 60) {
+    const impliedKbps = (size * 8) / d / 1000;
+    // Real phone MP3s are almost never < 64kbps at multi‑MB size
+    if (impliedKbps > 0 && impliedKbps < 64 && d > 8 * 60) {
+      return est || Math.max(1, Math.round(d * (impliedKbps / 192)));
+    }
+    if (est > 0 && d > est * 1.55 && d > 6 * 60) return est;
+    if (est > 0 && d > 15 * 60 && est <= 12 * 60) return est;
+  }
+
+  // No/useless fileSize — still undo classic ×24 (8kbps vs 192) inflation
+  // e.g. 80:34 → 3:21, 56:28 → 2:21, 53:19 → 2:13
+  if (d > 15 * 60 && d < 3 * 3600) {
+    const by24 = Math.round(d / 24);
+    if (by24 >= 70 && by24 <= 12 * 60) return by24;
+    const by20 = Math.round(d / 20);
+    if (by20 >= 70 && by20 <= 12 * 60) return by20;
+    const by16 = Math.round(d / 16);
+    if (by16 >= 70 && by16 <= 12 * 60) return by16;
+  }
+
+  if (d > 90 * 60) {
+    const collapsed = Math.round((original >= 10000 ? original : d) / 1000);
     if (collapsed >= 45 && collapsed <= 20 * 60) return collapsed;
   }
 
@@ -2895,18 +2910,21 @@ function durationLooksBogus(durationSec, fileSize) {
   const raw = Number(durationSec) || 0;
   if (raw <= 0) return true;
   if (raw >= 10000) return true;
+  if (raw > 15 * 60) {
+    const fixed = sanitizeSongDuration(raw, fileSize);
+    if (fixed > 0 && Math.abs(fixed - normalizeDurationSeconds(raw)) > 2) return true;
+  }
   const fixed = sanitizeSongDuration(raw, fileSize);
   return fixed > 0 && Math.abs(fixed - normalizeDurationSeconds(raw)) > 2;
 }
 
 function formatTime(seconds, fallback = '0:00', fileSize) {
-  const sec = fileSize != null
-    ? sanitizeSongDuration(seconds, fileSize)
-    : normalizeDurationSeconds(seconds);
+  // Always sanitize — even when fileSize missing (fixes 53:xx / 80:xx list bugs)
+  const sec = sanitizeSongDuration(seconds, fileSize);
   if (!sec) {
     if (seconds === 0 && fallback !== '0:00') return fallback;
     if (isNaN(seconds) || seconds < 0) return fallback;
-    if (!sec) return fallback;
+    return fallback;
   }
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
@@ -3087,10 +3105,10 @@ async function handleNativeSongs(nativeList, options = {}) {
 
     for (let k = 0; k < keys.length; k++) known.add(keys[k]);
 
-    let audioUrl = item.contentUri;
-    if (window.Capacitor && window.Capacitor.convertFileSrc && item.path) {
-      audioUrl = window.Capacitor.convertFileSrc(item.path);
-    }
+      let audioUrl = item.contentUri;
+      if (window.Capacitor && window.Capacitor.convertFileSrc && item.path) {
+        audioUrl = window.Capacitor.convertFileSrc(item.path);
+      }
 
     let duration = sanitizeSongDuration(item.duration, item.size);
     if (!(duration > 0)) duration = estimateDurationFromSize(item.size) || 0;
@@ -3099,19 +3117,19 @@ async function handleNativeSongs(nativeList, options = {}) {
     const addedAt = baseTs + (nativeList.length - i);
 
     newSongs.push({
-      id: item.id || ('mm_nat_' + baseTs + '_' + i),
-      title: item.title,
-      artist: item.artist,
-      album: item.album,
-      duration: duration,
-      audioBlob: null,
-      audioUrl: audioUrl,
-      nativePath: item.path,
-      nativeUri: item.contentUri,
-      coverBlob: null,
-      coverUrl: item.albumArtUri || 'logo.png',
-      fileName: item.fileName,
-      fileSize: item.size,
+        id: item.id || ('mm_nat_' + baseTs + '_' + i),
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        duration: duration,
+        audioBlob: null,
+        audioUrl: audioUrl,
+        nativePath: item.path,
+        nativeUri: item.contentUri,
+        coverBlob: null,
+        coverUrl: item.albumArtUri || 'logo.png',
+        fileName: item.fileName,
+        fileSize: item.size,
       addedAt,
       isNative: true,
       _durationVerified: duration > 0 && !durationLooksBogus(duration, item.size)
@@ -3136,19 +3154,19 @@ async function handleNativeSongs(nativeList, options = {}) {
 
   // Prepend only new tracks — O(new) vs full re-sort of whole library
   const newIds = new Set(newSongs.map(s => s.id));
-  state.songs = [
-    ...newSongs,
+    state.songs = [
+      ...newSongs,
     ...state.songs.filter(s => !newIds.has(s.id))
-  ];
+    ];
   invalidateSongMap();
 
-  rebuildQueue(true);
-  renderTrackList();
-  updateLibraryBadges();
+    rebuildQueue(true);
+    renderTrackList();
+    updateLibraryBadges();
 
-  if (state.currentIndex === -1 && state.songs.length > 0) {
-    state.currentIndex = 0;
-    updateUIWithSong(state.songs[0]);
+    if (state.currentIndex === -1 && state.songs.length > 0) {
+      state.currentIndex = 0;
+      updateUIWithSong(state.songs[0]);
   }
 
   if (!silent) hideScanProgress(newSongs.length, total);
@@ -3784,9 +3802,15 @@ function setupPwaAutoUpdate() {
 
   // Register ASAP (standalone Android/iOS often skip waiting for window "load")
   navigator.serviceWorker
-    .register('./sw.js')
+    .register('./sw.js?b=' + APP_BUILD)
     .then((reg) => {
       console.log('SW registered', reg.scope, 'build', APP_BUILD, 'standalone', isRunningStandalone());
+      // Drop stale caches from builds that still showed 50–80 phút
+      if ('caches' in window) {
+        caches.keys().then((keys) => {
+          keys.filter((k) => k !== ('mm-drive-cache-v' + APP_BUILD)).forEach((k) => caches.delete(k));
+        }).catch(() => {});
+      }
       reg.update().catch(() => {});
       activateWaiting(reg);
       reg.addEventListener('updatefound', () => {
@@ -3821,7 +3845,7 @@ async function initApp() {
     const demoMode = urlParams.get('demo') === '1' || urlParams.get('demo') === 'true';
     const demoReset = urlParams.get('reset') === '1';
 
-    // Rewrite every stored duration — wipe 50–80 phút leftovers from older builds
+    // Force-fix inflated times (53:xx / 80:xx → ~2–3 phút) every boot on build < 39 logic
     let durationFixed = 0;
     state.songs = storedSongs.map((s) => {
       const before = Number(s.duration) || 0;
@@ -3838,7 +3862,8 @@ async function initApp() {
       const coverUrl = (s.coverUrl && !String(s.coverUrl).startsWith('blob:'))
         ? s.coverUrl
         : 'logo.png';
-      const stillSuspect = durationLooksBogus(duration, s.fileSize) || (duration > 25 * 60 && (s.fileSize || 0) < 15 * 1024 * 1024);
+      // Anything still > 12 phút without probe is not trusted
+      const verified = !!(duration > 0 && duration <= 12 * 60 && s._durationVerified && !durationLooksBogus(duration, s.fileSize));
       return {
         ...s,
         duration,
@@ -3847,7 +3872,7 @@ async function initApp() {
         audioBlob: null,
         coverBlob: null,
         _objectUrl: null,
-        _durationVerified: !!(s._durationVerified && duration > 0 && !stillSuspect)
+        _durationVerified: verified
       };
     });
 
@@ -3855,9 +3880,9 @@ async function initApp() {
     invalidateSongMap();
     if (durationFixed > 0) {
       dbAddSongsBatch(state.songs).catch(() => {});
-      showToast(`Đã sửa thời lượng ${durationFixed} bài bị lệch`, '⏱️');
+      setTimeout(() => showToast(`Đã sửa ${durationFixed} thời lượng bài hát`, '⏱️'), 500);
     }
-    setTimeout(() => repairDurationsInBackground(state.songs), 1600);
+    setTimeout(() => repairDurationsInBackground(state.songs), 900);
 
     if (demoMode) {
       await seedDemoLibrary({ force: demoReset || state.songs.length === 0 });
@@ -3882,7 +3907,7 @@ async function initApp() {
       const needRestore = state.songs.length === 0
         || state.songs.some((s) => !s.isNative && !s.fileHandle && !s.opfsName && !s.isDemo);
       if (needRestore || state.songs.length === 0) {
-        setTimeout(() => {
+      setTimeout(() => {
           reindexFromSavedDirHandle({ silent: state.songs.length > 0 }).then((n) => {
             if (n > 0 && state.songs.length > 0 && state.currentIndex < 0) {
               state.currentIndex = 0;
