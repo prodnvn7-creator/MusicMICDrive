@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 35;
+const APP_BUILD = 36;
 
 const state = {
   db: null,
@@ -1987,7 +1987,16 @@ async function handleAudioFiles(files) {
       title = parts.slice(1).join(' - ').trim();
     }
 
-    const duration = Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
+    // Prefer header parse (fast) over size guess (was showing 50–80 phút)
+    let duration = 0;
+    try {
+      duration = await fastGetAudioDuration(file);
+    } catch (e) {}
+    duration = normalizeDurationSeconds(duration);
+    if (!(duration > 0) || durationLooksBogus(duration, file.size)) {
+      duration = estimateDurationFromSize(file.size) || 15;
+    }
+
     const song = {
       id: songId,
       title,
@@ -2005,12 +2014,12 @@ async function handleAudioFiles(files) {
       fileName: file.name,
       fileSize: file.size,
       addedAt: baseTs + (total - i) * 10,
-      _durationVerified: false
+      _durationVerified: duration > 0 && !durationLooksBogus(duration, file.size)
     };
     newSongs.push(song);
     if (!handle) needOpfs.push(song);
 
-    if (i % 20 === 0 || i === total - 1) {
+    if (i % 12 === 0 || i === total - 1) {
       updateScanProgress(i + 1, total, title);
       await yieldToUI();
     }
@@ -2127,6 +2136,18 @@ async function reindexFromSavedDirHandle(options = {}) {
     if (existing) {
       existing.fileHandle = handle;
       attached++;
+      if (durationLooksBogus(existing.duration, existing.fileSize)) {
+        try {
+          let d = await fastGetAudioDuration(file);
+          d = normalizeDurationSeconds(d);
+          if (d > 0 && !durationLooksBogus(d, file.size)) {
+            existing.duration = d;
+            existing._durationVerified = true;
+          } else {
+            existing.duration = estimateDurationFromSize(file.size) || existing.duration;
+          }
+        } catch (e) {}
+      }
     } else {
       let title = file.name.replace(/\.[^/.]+$/, '');
       let artist = 'Music MIC Driver';
@@ -2135,12 +2156,18 @@ async function reindexFromSavedDirHandle(options = {}) {
         artist = parts[0].trim();
         title = parts.slice(1).join(' - ').trim();
       }
+      let duration = 0;
+      try { duration = await fastGetAudioDuration(file); } catch (e) {}
+      duration = normalizeDurationSeconds(duration);
+      if (!(duration > 0) || durationLooksBogus(duration, file.size)) {
+        duration = estimateDurationFromSize(file.size) || 15;
+      }
       toAdd.push({
         id: 'mm_rest_' + baseTs + '_' + i,
         title,
         artist,
         album: 'Music MIC Driver',
-        duration: Math.max(15, Math.round((file.size * 8) / (160 * 1000))),
+        duration,
         fileHandle: handle,
         opfsName: null,
         fileName: file.name,
@@ -2148,7 +2175,8 @@ async function reindexFromSavedDirHandle(options = {}) {
         addedAt: baseTs + (items.length - i),
         coverUrl: 'logo.png',
         audioUrl: '',
-        audioBlob: null
+        audioBlob: null,
+        _durationVerified: duration > 0 && !durationLooksBogus(duration, file.size)
       });
     }
     if (i % 30 === 0) await yieldToUI();
@@ -2791,11 +2819,47 @@ function showToast(msg, icon = '✨') {
   }, 2400);
 }
 
+/**
+ * Always return duration in SECONDS.
+ * Fixes MediaStore/ms leftovers showing 2–3 phút as 50–80+ phút.
+ */
+function normalizeDurationSeconds(raw) {
+  let d = Number(raw);
+  if (!Number.isFinite(d) || d <= 0) return 0;
+  // Values like 180000 are milliseconds (3:00), not seconds
+  if (d >= 10000) d = d / 1000;
+  // Still absurd for a normal song (> 3 hours) — likely leftover ms/10
+  if (d > 3 * 3600) d = d / 1000;
+  return Math.max(1, Math.round(d));
+}
+
+function estimateDurationFromSize(fileSize) {
+  if (!fileSize || fileSize <= 0) return 0;
+  // ~192 kbps typical phone rips (160 made big files look like 50–80 phút)
+  return Math.max(1, Math.round((fileSize * 8) / (192 * 1000)));
+}
+
+function durationLooksBogus(durationSec, fileSize) {
+  const d = Number(durationSec) || 0;
+  if (d <= 0) return true;
+  if (d >= 10000) return true; // still ms
+  if (d > 45 * 60) {
+    if (!fileSize) return true;
+    const est = estimateDurationFromSize(fileSize);
+    // e.g. shows 80 phút but file size says ~4 phút
+    if (est > 0 && d > est * 2.2) return true;
+  }
+  return false;
+}
+
 function formatTime(seconds, fallback = '0:00') {
-  if (isNaN(seconds) || seconds < 0) return fallback;
-  if (seconds === 0 && fallback !== '0:00') return fallback;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
+  const sec = normalizeDurationSeconds(seconds);
+  if (!sec) {
+    if (seconds === 0 && fallback !== '0:00') return fallback;
+    if (isNaN(seconds) || seconds < 0) return fallback;
+  }
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
@@ -2926,11 +2990,9 @@ async function handleNativeSongs(nativeList, options = {}) {
       audioUrl = window.Capacitor.convertFileSrc(item.path);
     }
 
-    let duration = (typeof item.duration === 'number' && item.duration > 0)
-      ? Math.round(item.duration)
-      : 0;
-    if (duration <= 0 && item.size > 0) {
-      duration = Math.max(15, Math.round((item.size * 8) / (160 * 1000)));
+    let duration = normalizeDurationSeconds(item.duration);
+    if (!(duration > 0) || durationLooksBogus(duration, item.size)) {
+      duration = estimateDurationFromSize(item.size) || 0;
     }
 
     // Stamp discover-time so brand-new downloads always float to the top
@@ -2952,7 +3014,7 @@ async function handleNativeSongs(nativeList, options = {}) {
       fileSize: item.size,
       addedAt,
       isNative: true,
-      _durationVerified: duration > 0
+      _durationVerified: duration > 0 && !durationLooksBogus(duration, item.size)
     });
 
     if (!silent && (newSongs.length % 50 === 0 || i === total - 1)) {
@@ -3652,11 +3714,16 @@ async function initApp() {
     const demoMode = urlParams.get('demo') === '1' || urlParams.get('demo') === 'true';
     const demoReset = urlParams.get('reset') === '1';
 
-    // Metadata only on boot — NO createObjectURL for whole library (was heating phones)
+    // Metadata only on boot — fix bogus durations (ms / size-guess 50–80 phút)
+    let durationFixed = 0;
     state.songs = storedSongs.map((s) => {
-      let duration = (typeof s.duration === 'number' && s.duration > 0) ? s.duration : 0;
-      if (duration <= 0 && s.fileSize > 0) {
-        duration = Math.max(15, Math.round((s.fileSize * 8) / (160 * 1000)));
+      let duration = normalizeDurationSeconds(s.duration);
+      if (!(duration > 0) || durationLooksBogus(duration, s.fileSize)) {
+        const est = estimateDurationFromSize(s.fileSize);
+        if (est > 0) {
+          duration = est;
+          durationFixed++;
+        }
       }
       let audioUrl = '';
       if (s.isNative) {
@@ -3676,12 +3743,16 @@ async function initApp() {
         coverUrl,
         audioBlob: null,
         coverBlob: null,
-        _objectUrl: null
+        _objectUrl: null,
+        _durationVerified: !!(s._durationVerified && !durationLooksBogus(duration, s.fileSize))
       };
     });
 
     state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     invalidateSongMap();
+    if (durationFixed > 0) {
+      dbAddSongsBatch(state.songs).catch(() => {});
+    }
 
     if (demoMode) {
       await seedDemoLibrary({ force: demoReset || state.songs.length === 0 });
