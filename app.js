@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 34;
+const APP_BUILD = 35;
 
 const state = {
   db: null,
@@ -471,6 +471,11 @@ async function ensureSongPlayable(song) {
     if (song.opfsName) {
       const file = await opfsReadTrack(song.opfsName);
       song._objectUrl = URL.createObjectURL(file);
+      song.audioUrl = song._objectUrl;
+      return song._objectUrl;
+    }
+    if (song._sessionFile instanceof Blob) {
+      song._objectUrl = URL.createObjectURL(song._sessionFile);
       song.audioUrl = song._objectUrl;
       return song._objectUrl;
     }
@@ -1898,9 +1903,10 @@ async function fastGetAudioDuration(file) {
 
 
 /**
- * Import audio — durable persistence:
- * - File System Access handle → lưu handle (nhẹ, mở lại được)
- * - File input thuần → copy OPFS (không nhét GB vào IndexedDB)
+ * Import audio — FAST + durable:
+ * - Folder picker handles → lưu handle (nhanh, mở lại còn)
+ * - File input không có handle → hiện list ngay, OPFS copy nền từng bài (1 luồng, khỏi nóng máy)
+ * - Không tạo blob URL hàng loạt khi quét (tránh lag/RAM)
  */
 async function handleAudioFiles(files) {
   if (!files || files.length === 0) {
@@ -1962,12 +1968,12 @@ async function handleAudioFiles(files) {
   }
 
   const total = uniqueItems.length;
-  showScanProgress(total, 'Đang lưu thư viện (bền vững)…');
+  const withHandles = uniqueItems.filter((x) => x.handle).length;
+  showScanProgress(total, withHandles ? 'Đang lưu danh sách (nhanh)…' : 'Đang nạp danh sách…');
 
   const baseTs = Date.now();
   const newSongs = [];
-  let persistFails = 0;
-  const canOpfs = !!(navigator.storage && navigator.storage.getDirectory);
+  const needOpfs = [];
 
   for (let i = 0; i < uniqueItems.length; i++) {
     const { file, handle } = uniqueItems[i];
@@ -1982,42 +1988,29 @@ async function handleAudioFiles(files) {
     }
 
     const duration = Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
-    let opfsName = null;
-    let fileHandle = handle || null;
-
-    // Prefer handle (no copy). Else OPFS copy so reopen still works.
-    if (!fileHandle && canOpfs) {
-      try {
-        opfsName = await opfsWriteTrack(songId, file);
-      } catch (e) {
-        persistFails++;
-        console.warn('OPFS write fail', e);
-      }
-    }
-
-    // Temporary blob URL for this session only (not stored in IDB)
-    const audioUrl = URL.createObjectURL(file);
-
-    newSongs.push({
+    const song = {
       id: songId,
       title,
       artist,
       album: 'Music MIC Driver',
       duration,
       audioBlob: null,
-      audioUrl,
-      _objectUrl: audioUrl,
-      fileHandle,
-      opfsName,
+      audioUrl: '',
+      _objectUrl: null,
+      fileHandle: handle || null,
+      opfsName: null,
+      _sessionFile: handle ? null : file,
       coverBlob: null,
       coverUrl: 'logo.png',
       fileName: file.name,
       fileSize: file.size,
       addedAt: baseTs + (total - i) * 10,
       _durationVerified: false
-    });
+    };
+    newSongs.push(song);
+    if (!handle) needOpfs.push(song);
 
-    if (i % 8 === 0 || i === total - 1) {
+    if (i % 20 === 0 || i === total - 1) {
       updateScanProgress(i + 1, total, title);
       await yieldToUI();
     }
@@ -2026,9 +2019,7 @@ async function handleAudioFiles(files) {
   updateScanProgress(total, total, 'Đang ghi danh sách vào máy…');
   const saveResult = await dbAddSongsBatch(newSongs);
   if (saveResult.fail > 0 || (saveResult.error && saveResult.ok === 0)) {
-    showToast('Lưu thư viện lỗi — thiếu dung lượng hoặc trình duyệt chặn lưu', '⚠️');
-  } else if (persistFails > 0 && !uniqueItems.some((x) => x.handle)) {
-    showToast(`Có ${persistFails} bài chưa ghi được ổ tạm — có thể mất khi thoát app`, '⚠️');
+    showToast('Lưu danh sách lỗi — thiếu dung lượng trình duyệt', '⚠️');
   }
 
   state.songs = [
@@ -2047,9 +2038,141 @@ async function handleAudioFiles(files) {
   }
 
   hideScanProgress(newSongs.length, total);
-  if (saveResult.ok > 0) {
-    showToast(`Đã lưu ${saveResult.ok} bài — thoát app vẫn còn`, '💾');
+
+  if (withHandles === total) {
+    showToast(`Đã lưu ${saveResult.ok} bài (thư mục) — thoát app vẫn còn`, '💾');
+  } else if (needOpfs.length > 0) {
+    showToast(`Đã hiện ${newSongs.length} bài — đang lưu nền để không mất…`, '💾');
+    persistSongsToOpfsBackground(needOpfs);
+  } else if (saveResult.ok > 0) {
+    showToast(`Đã lưu ${saveResult.ok} bài`, '💾');
   }
+}
+
+/** One-at-a-time OPFS copy — cooler phone than blasting 300 writes */
+async function persistSongsToOpfsBackground(songs) {
+  if (!songs || !songs.length) return;
+  if (!(navigator.storage && navigator.storage.getDirectory)) {
+    showToast('Máy không hỗ trợ lưu nền — lần sau dùng Quét → chọn thư mục', '⚠️');
+    return;
+  }
+  let done = 0;
+  for (let i = 0; i < songs.length; i++) {
+    const song = songs[i];
+    if (!song || song.opfsName || song.fileHandle) continue;
+    const src = song._sessionFile;
+    if (!(src instanceof Blob)) continue;
+    try {
+      while (document.hidden) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      song.opfsName = await opfsWriteTrack(song.id, src);
+      song._sessionFile = null;
+      await dbAddSong(song);
+      done++;
+      if (done % 15 === 0 || done === songs.length) {
+        showToast(`Đã bảo vệ lưu ${done}/${songs.length} bài`, '💾');
+      }
+    } catch (e) {
+      console.warn('OPFS bg fail', song.id, e);
+    }
+    await new Promise((r) => setTimeout(r, 40));
+    await yieldToUI();
+  }
+  if (done > 0) showToast(`Lưu bền xong ${done} bài — thoát app vẫn còn`, '✅');
+}
+
+/** Re-attach handles / rebuild library from saved folder (Chrome/Android PWA) */
+async function reindexFromSavedDirHandle(options = {}) {
+  const silent = !!options.silent;
+  let dirHandle = null;
+  try {
+    dirHandle = await dbGetSetting('libraryDirHandle');
+  } catch (e) {
+    return 0;
+  }
+  if (!dirHandle || typeof dirHandle.values !== 'function') return 0;
+
+  try {
+    if (typeof dirHandle.queryPermission === 'function') {
+      let perm = await dirHandle.queryPermission({ mode: 'read' });
+      if (perm !== 'granted' && typeof dirHandle.requestPermission === 'function') {
+        perm = await dirHandle.requestPermission({ mode: 'read' });
+      }
+      if (perm !== 'granted') return 0;
+    }
+  } catch (e) {
+    return 0;
+  }
+
+  if (!silent) beginPhoneScanProgress('Đang khôi phục từ thư mục đã lưu…');
+  const items = await scanDirectoryRecursively(dirHandle, (found) => {
+    if (!silent) updateScanDiscoverCount(found);
+  });
+  if (!items.length) {
+    if (!silent) abortScanProgress();
+    return 0;
+  }
+
+  // Reattach handles onto existing rows; add missing tracks
+  const byKey = new Map(state.songs.map((s) => [`${s.fileName}__${s.fileSize || 0}`, s]));
+  let attached = 0;
+  const toAdd = [];
+  const baseTs = Date.now();
+
+  for (let i = 0; i < items.length; i++) {
+    const { file, handle } = items[i];
+    const key = `${file.name}__${file.size}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.fileHandle = handle;
+      attached++;
+    } else {
+      let title = file.name.replace(/\.[^/.]+$/, '');
+      let artist = 'Music MIC Driver';
+      if (title.includes(' - ')) {
+        const parts = title.split(' - ');
+        artist = parts[0].trim();
+        title = parts.slice(1).join(' - ').trim();
+      }
+      toAdd.push({
+        id: 'mm_rest_' + baseTs + '_' + i,
+        title,
+        artist,
+        album: 'Music MIC Driver',
+        duration: Math.max(15, Math.round((file.size * 8) / (160 * 1000))),
+        fileHandle: handle,
+        opfsName: null,
+        fileName: file.name,
+        fileSize: file.size,
+        addedAt: baseTs + (items.length - i),
+        coverUrl: 'logo.png',
+        audioUrl: '',
+        audioBlob: null
+      });
+    }
+    if (i % 30 === 0) await yieldToUI();
+  }
+
+  if (attached > 0) {
+    await dbAddSongsBatch(state.songs.filter((s) => s.fileHandle));
+  }
+  if (toAdd.length) {
+    await dbAddSongsBatch(toAdd);
+    state.songs = [...toAdd, ...state.songs];
+    invalidateSongMap();
+    rebuildQueue(true);
+    renderTrackList();
+    updateLibraryBadges();
+  } else if (attached > 0) {
+    await dbAddSongsBatch(state.songs);
+  }
+
+  if (!silent) {
+    hideScanProgress(toAdd.length || attached, items.length);
+    showToast(`Khôi phục OK · ${state.songs.length} bài`, '💾');
+  }
+  return toAdd.length + attached;
 }
 
 /**
@@ -3433,7 +3556,10 @@ function setupIosInstallHint() {
   setTimeout(show, forcePreview ? 200 : 1600);
 }
 
-/** Keep Chrome "Cài đặt ứng dụng" / home-screen icon on the latest build automatically */
+/**
+ * Auto-update for Android Chrome "Cài đặt" AND iOS "Thêm vào Màn hình chính".
+ * Same SW + version.json stamp — both platforms pick up GitHub Pages pushes.
+ */
 function setupPwaAutoUpdate() {
   if (!('serviceWorker' in navigator)) return;
 
@@ -3456,7 +3582,6 @@ function setupPwaAutoUpdate() {
     window.location.reload();
   };
 
-  /** Compare local bundle vs version.json on server (works even if SW is sticky) */
   const checkBuildStamp = async () => {
     try {
       const res = await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' });
@@ -3468,9 +3593,7 @@ function setupPwaAutoUpdate() {
         console.log(`[update] remote build ${remote} ≠ local ${APP_BUILD} → refresh`);
         await wipeCachesAndReload();
       }
-    } catch (e) {
-      // offline — keep current shell
-    }
+    } catch (e) {}
   };
 
   const activateWaiting = (reg) => {
@@ -3490,35 +3613,34 @@ function setupPwaAutoUpdate() {
 
   navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
 
-  window.addEventListener('load', () => {
-    navigator.serviceWorker
-      .register('./sw.js')
-      .then((reg) => {
-        console.log('Service Worker Registered! Scope:', reg.scope, 'build', APP_BUILD);
-        reg.update().catch(() => {});
-        activateWaiting(reg);
-        reg.addEventListener('updatefound', () => {
-          const neu = reg.installing;
-          if (!neu) return;
-          neu.addEventListener('statechange', () => {
-            if (neu.state === 'installed') activateWaiting(reg);
-          });
+  // Register ASAP (standalone Android/iOS often skip waiting for window "load")
+  navigator.serviceWorker
+    .register('./sw.js')
+    .then((reg) => {
+      console.log('SW registered', reg.scope, 'build', APP_BUILD, 'standalone', isRunningStandalone());
+      reg.update().catch(() => {});
+      activateWaiting(reg);
+      reg.addEventListener('updatefound', () => {
+        const neu = reg.installing;
+        if (!neu) return;
+        neu.addEventListener('statechange', () => {
+          if (neu.state === 'installed') activateWaiting(reg);
         });
-      })
-      .catch((err) => console.warn('Service Worker registration failed:', err));
+      });
+    })
+    .catch((err) => console.warn('SW registration failed:', err));
 
-    checkBuildStamp();
-  });
+  checkBuildStamp();
+  window.addEventListener('load', checkBuildStamp);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkSwUpdate();
   });
   window.addEventListener('focus', checkSwUpdate);
   window.addEventListener('pageshow', checkSwUpdate);
-  // Light update ping while installed app stays open (only when visible)
   setInterval(() => {
     if (!document.hidden) checkSwUpdate();
-  }, 120000);
+  }, 60000);
 }
 
 async function initApp() {
@@ -3577,27 +3699,38 @@ async function initApp() {
     if (state.songs.length > 0) {
       state.currentIndex = 0;
       updateUIWithSong(state.songs[0]);
-      showToast(`Thư viện: ${state.songs.length} bài (đã khôi phục)`, '💾');
-    } else if (!demoMode) {
-      // Try restore from previously granted folder (Chrome/Android PWA)
-      try {
-        const dirHandle = await dbGetSetting('libraryDirHandle');
-        if (dirHandle && dirHandle.values) {
-          showToast('Chạm Quét để khôi phục từ thư mục đã chọn', '📁');
-        }
-      } catch (e) {}
     }
 
-    // APK: MediaStore — empty → scan once; else rare silent delta only
+    // Chrome/Android + iOS PWA: restore from saved folder handle (no re-copy)
+    if (!demoMode && !isNativeApk()) {
+      const needRestore = state.songs.length === 0
+        || state.songs.some((s) => !s.isNative && !s.fileHandle && !s.opfsName && !s.isDemo);
+      if (needRestore || state.songs.length === 0) {
+        setTimeout(() => {
+          reindexFromSavedDirHandle({ silent: state.songs.length > 0 }).then((n) => {
+            if (n > 0 && state.songs.length > 0 && state.currentIndex < 0) {
+              state.currentIndex = 0;
+              updateUIWithSong(state.songs[0]);
+            }
+          }).catch(() => {});
+        }, 500);
+      } else if (state.songs.length > 0) {
+        showToast(`Thư viện: ${state.songs.length} bài`, '💾');
+      }
+    } else if (state.songs.length > 0) {
+      showToast(`Thư viện: ${state.songs.length} bài`, '💾');
+    }
+
+    // APK only: MediaStore empty → one scan (never every launch)
     if (isNativeApk()) {
       setupNativeAutoRefresh();
       if (state.songs.length === 0) {
         setTimeout(() => { scanAllAudioNative(); }, 800);
       }
-      // Do NOT silent-scan every launch — was a major heat source
     }
 
     setupIosInstallHint();
+    // Auto-update for BOTH Android Chrome install + iOS Add-to-Home-Screen
     setupPwaAutoUpdate();
 
     const warmAudio = () => {
