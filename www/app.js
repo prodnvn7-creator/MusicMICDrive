@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 37;
+const APP_BUILD = 38;
 
 const state = {
   db: null,
@@ -1437,17 +1437,20 @@ function setupDeckEvents(deck) {
 
   // Dynamic accurate duration update when metadata is loaded
   deck.addEventListener('loadedmetadata', () => {
-    if (deck === activeDeck && deck.duration && !isNaN(deck.duration)) {
+    if (deck === activeDeck && deck.duration && !isNaN(deck.duration) && deck.duration < 3 * 3600) {
       const currentSong = getCurrentSong();
-      if (currentSong && (!currentSong.duration || Math.abs(currentSong.duration - deck.duration) > 1)) {
-        currentSong.duration = deck.duration;
+      const realDur = Math.round(deck.duration);
+      if (currentSong && realDur > 0 && Math.abs((currentSong.duration || 0) - realDur) > 1) {
+        currentSong.duration = realDur;
+        currentSong._durationVerified = true;
         dbAddSong(currentSong).catch(() => {});
         const mono = document.querySelector(`.track-item[data-id="${currentSong.id}"] .font-mono`);
-        if (mono) mono.textContent = formatTime(deck.duration, '--:--');
+        if (mono) mono.textContent = formatTime(realDur, '--:--', currentSong.fileSize);
+        renderTrackList();
       }
       if (currentTimeDisplay && remainingTimeDisplay) {
         currentTimeDisplay.textContent = formatTime(deck.currentTime || 0);
-        remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, deck.duration - (deck.currentTime || 0)));
+        remainingTimeDisplay.textContent = '-' + formatTime(Math.max(0, realDur - (deck.currentTime || 0)));
       }
     }
   });
@@ -1753,10 +1756,16 @@ function probeDurationWithAudio(src) {
 }
 
 async function repairDurationsInBackground(songs) {
-  // Only probe tracks with missing/bogus duration — full-library decode heats the phone
-  const list = (songs || []).filter((s) =>
-    s && !s.isDemo && !s._durationVerified && (s.audioBlob || s.audioUrl) && !(s.duration > 1)
-  );
+  // Missing OR inflated (50–80 phút) — probe real length when playable
+  const list = (songs || []).filter((s) => {
+    if (!s || s.isDemo) return false;
+    const playable = !!(s.audioBlob || s.audioUrl || s.nativeUri);
+    if (!playable) return false;
+    if (!(s.duration > 1)) return true;
+    if (durationLooksBogus(s.duration, s.fileSize)) return true;
+    if (s.duration > 20 * 60 && (s.fileSize || 0) > 0 && (s.fileSize || 0) < 12 * 1024 * 1024) return true;
+    return !s._durationVerified && !(s.duration > 1);
+  }).slice(0, 40);
   if (list.length === 0) return;
 
   for (let i = 0; i < list.length; i++) {
@@ -1764,22 +1773,32 @@ async function repairDurationsInBackground(songs) {
       await new Promise((r) => setTimeout(r, 800));
     }
     const song = list[i];
-    if (!song || song._durationVerified) continue;
-    const src = song.audioBlob || song.audioUrl;
+    if (!song) continue;
+    const src = song.audioBlob || song.audioUrl || song.nativeUri;
     const dur = await probeDurationWithAudio(src);
-    song._durationVerified = true;
-    if (dur > 0 && Math.abs((song.duration || 0) - dur) > 1) {
-      song.duration = dur;
-      try { await dbAddSong(song); } catch (e) {}
-      const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
-      if (mono) mono.textContent = formatTime(dur, '--:--');
-      const current = getCurrentSong();
-      if (current && current.id === song.id && remainingTimeDisplay) {
-        const left = Math.max(0, dur - (activeDeck.currentTime || 0));
-        remainingTimeDisplay.textContent = '-' + formatTime(left);
+    if (dur > 0 && dur < 3 * 3600) {
+      song._durationVerified = true;
+      if (Math.abs((song.duration || 0) - dur) > 1) {
+        song.duration = dur;
+        try { await dbAddSong(song); } catch (e) {}
+        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+        if (mono) mono.textContent = formatTime(dur, '--:--', song.fileSize);
+        const current = getCurrentSong();
+        if (current && current.id === song.id && remainingTimeDisplay) {
+          const left = Math.max(0, dur - (activeDeck.currentTime || 0));
+          remainingTimeDisplay.textContent = '-' + formatTime(left);
+        }
+      }
+    } else {
+      const fixed = sanitizeSongDuration(song.duration, song.fileSize);
+      if (fixed > 0 && Math.abs(fixed - (song.duration || 0)) > 1) {
+        song.duration = fixed;
+        song._durationVerified = false;
+        try { await dbAddSong(song); } catch (e) {}
+        const mono = document.querySelector(`.track-item[data-id="${song.id}"] .font-mono`);
+        if (mono) mono.textContent = formatTime(fixed, '--:--', song.fileSize);
       }
     }
-    // Yield so UI / audio stay responsive
     if (i % 2 === 1) await new Promise((r) => setTimeout(r, 120));
   }
 }
@@ -1897,8 +1916,12 @@ async function fastGetAudioDuration(file) {
           }
         }
 
+        // Low first-frame bitrate (8–48kbps) on phone MP3s → fake 50–80 phút
+        let useBr = bitrate;
+        if (bitrate < 64 && file.size > 800000) useBr = 192;
+        else if (bitrate < 96 && file.size > 3000000) useBr = Math.max(bitrate, 160);
         const audioDataSize = Math.max(1, file.size - (id3Size || 0));
-        return Math.max(1, Math.round((audioDataSize * 8) / (bitrate * 1000)));
+        return Math.max(1, Math.round((audioDataSize * 8) / (useBr * 1000)));
       }
     }
   } catch (e) {
@@ -1906,7 +1929,7 @@ async function fastGetAudioDuration(file) {
   }
 
   if (file.size > 0) {
-    return Math.max(15, Math.round((file.size * 8) / (160 * 1000)));
+    return estimateDurationFromSize(file.size) || 15;
   }
   return 0;
 }
@@ -1997,15 +2020,13 @@ async function handleAudioFiles(files) {
       title = parts.slice(1).join(' - ').trim();
     }
 
-    // Prefer header parse (fast) over size guess (was showing 50–80 phút)
+    // Prefer header parse; always sanitize vs file size (kills 50–80 phút bugs)
     let duration = 0;
     try {
       duration = await fastGetAudioDuration(file);
     } catch (e) {}
-    duration = normalizeDurationSeconds(duration);
-    if (!(duration > 0) || durationLooksBogus(duration, file.size)) {
-      duration = estimateDurationFromSize(file.size) || 15;
-    }
+    duration = sanitizeSongDuration(duration, file.size);
+    if (!(duration > 0)) duration = estimateDurationFromSize(file.size) || 15;
 
     const song = {
       id: songId,
@@ -2146,17 +2167,16 @@ async function reindexFromSavedDirHandle(options = {}) {
     if (existing) {
       existing.fileHandle = handle;
       attached++;
-      if (durationLooksBogus(existing.duration, existing.fileSize)) {
+      if (durationLooksBogus(existing.duration, existing.fileSize || file.size)) {
         try {
           let d = await fastGetAudioDuration(file);
-          d = normalizeDurationSeconds(d);
-          if (d > 0 && !durationLooksBogus(d, file.size)) {
-            existing.duration = d;
-            existing._durationVerified = true;
-          } else {
-            existing.duration = estimateDurationFromSize(file.size) || existing.duration;
-          }
-        } catch (e) {}
+          d = sanitizeSongDuration(d, file.size);
+          existing.duration = d > 0 ? d : (estimateDurationFromSize(file.size) || existing.duration);
+          existing.fileSize = file.size || existing.fileSize;
+          existing._durationVerified = existing.duration > 0 && !durationLooksBogus(existing.duration, file.size);
+        } catch (e) {
+          existing.duration = sanitizeSongDuration(existing.duration, file.size);
+        }
       }
     } else {
       let title = file.name.replace(/\.[^/.]+$/, '');
@@ -2168,10 +2188,8 @@ async function reindexFromSavedDirHandle(options = {}) {
       }
       let duration = 0;
       try { duration = await fastGetAudioDuration(file); } catch (e) {}
-      duration = normalizeDurationSeconds(duration);
-      if (!(duration > 0) || durationLooksBogus(duration, file.size)) {
-        duration = estimateDurationFromSize(file.size) || 15;
-      }
+      duration = sanitizeSongDuration(duration, file.size);
+      if (!(duration > 0)) duration = estimateDurationFromSize(file.size) || 15;
       toAdd.push({
         id: 'mm_rest_' + baseTs + '_' + i,
         title,
@@ -2397,7 +2415,7 @@ function renderTrackList() {
         </div>
 
         <div class="flex items-center gap-3 flex-shrink-0">
-          <span class="text-xs text-white/40 font-mono">${formatTime(song.duration, '--:--')}</span>
+          <span class="text-xs text-white/40 font-mono">${formatTime(song.duration, '--:--', song.fileSize)}</span>
           <button class="delete-btn w-8 h-8 rounded-full flex items-center justify-center text-white/40 hover:text-red-400 active:scale-90 transition-all" data-delete-id="${song.id}" title="Xóa khỏi máy">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -2470,7 +2488,7 @@ function renderQueueList() {
               <span class="text-xs text-white/50 truncate">${escapeHtml(s.artist)}</span>
             </div>
           </div>
-          <span class="text-xs text-white/40 font-mono">${formatTime(s.duration, '--:--')}</span>
+          <span class="text-xs text-white/40 font-mono">${formatTime(s.duration, '--:--', s.fileSize)}</span>
         </div>
       `;
     }).join('');
@@ -2830,43 +2848,65 @@ function showToast(msg, icon = '✨') {
 }
 
 /**
- * Always return duration in SECONDS.
- * Fixes MediaStore/ms leftovers showing 2–3 phút as 50–80+ phút.
+ * Always return duration in SECONDS (ms → sec).
  */
 function normalizeDurationSeconds(raw) {
   let d = Number(raw);
   if (!Number.isFinite(d) || d <= 0) return 0;
-  // Values like 180000 are milliseconds (3:00), not seconds
+  // 180000 = 3:00 stored as milliseconds
   if (d >= 10000) d = d / 1000;
-  // Still absurd for a normal song (> 3 hours) — likely leftover ms/10
   if (d > 3 * 3600) d = d / 1000;
   return Math.max(1, Math.round(d));
 }
 
 function estimateDurationFromSize(fileSize) {
   if (!fileSize || fileSize <= 0) return 0;
-  // ~192 kbps typical phone rips (160 made big files look like 50–80 phút)
+  // ~192 kbps — lower bitrate made 3–5MB files look like 50–80 phút
   return Math.max(1, Math.round((fileSize * 8) / (192 * 1000)));
 }
 
-function durationLooksBogus(durationSec, fileSize) {
-  const d = Number(durationSec) || 0;
-  if (d <= 0) return true;
-  if (d >= 10000) return true; // still ms
-  if (d > 45 * 60) {
-    if (!fileSize) return true;
-    const est = estimateDurationFromSize(fileSize);
-    // e.g. shows 80 phút but file size says ~4 phút
-    if (est > 0 && d > est * 2.2) return true;
+/**
+ * Fix wrong list times: 2–3 phút songs stored/shown as 50–80 phút.
+ * Uses file size when header/MediaStore left a inflated second-count.
+ */
+function sanitizeSongDuration(raw, fileSize) {
+  const original = Number(raw);
+  let d = normalizeDurationSeconds(original);
+  const size = Number(fileSize) || 0;
+  const est = estimateDurationFromSize(size);
+
+  if (!(d > 0)) return est || 0;
+
+  if (est > 0) {
+    // Classic bug: ~3 phút file, stored ~3000–5000 giây
+    if (d > 12 * 60 && est <= 15 * 60 && d > est * 1.8) return est;
+    if (d > est * 2.2 && d > 6 * 60) return est;
+    if (d > 20 * 60 && est <= 18 * 60) return est;
+  } else if (d > 90 * 60) {
+    // No size — try one more ms-style collapse if it yields a sane song length
+    const collapsed = Math.round((Number.isFinite(original) && original >= 10000 ? original : d) / 1000);
+    if (collapsed >= 45 && collapsed <= 20 * 60) return collapsed;
   }
-  return false;
+
+  return d;
 }
 
-function formatTime(seconds, fallback = '0:00') {
-  const sec = normalizeDurationSeconds(seconds);
+function durationLooksBogus(durationSec, fileSize) {
+  const raw = Number(durationSec) || 0;
+  if (raw <= 0) return true;
+  if (raw >= 10000) return true;
+  const fixed = sanitizeSongDuration(raw, fileSize);
+  return fixed > 0 && Math.abs(fixed - normalizeDurationSeconds(raw)) > 2;
+}
+
+function formatTime(seconds, fallback = '0:00', fileSize) {
+  const sec = fileSize != null
+    ? sanitizeSongDuration(seconds, fileSize)
+    : normalizeDurationSeconds(seconds);
   if (!sec) {
     if (seconds === 0 && fallback !== '0:00') return fallback;
     if (isNaN(seconds) || seconds < 0) return fallback;
+    if (!sec) return fallback;
   }
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
@@ -3052,10 +3092,8 @@ async function handleNativeSongs(nativeList, options = {}) {
       audioUrl = window.Capacitor.convertFileSrc(item.path);
     }
 
-    let duration = normalizeDurationSeconds(item.duration);
-    if (!(duration > 0) || durationLooksBogus(duration, item.size)) {
-      duration = estimateDurationFromSize(item.size) || 0;
-    }
+    let duration = sanitizeSongDuration(item.duration, item.size);
+    if (!(duration > 0)) duration = estimateDurationFromSize(item.size) || 0;
 
     // Stamp discover-time so brand-new downloads always float to the top
     const addedAt = baseTs + (nativeList.length - i);
@@ -3783,17 +3821,12 @@ async function initApp() {
     const demoMode = urlParams.get('demo') === '1' || urlParams.get('demo') === 'true';
     const demoReset = urlParams.get('reset') === '1';
 
-    // Metadata only on boot — fix bogus durations (ms / size-guess 50–80 phút)
+    // Rewrite every stored duration — wipe 50–80 phút leftovers from older builds
     let durationFixed = 0;
     state.songs = storedSongs.map((s) => {
-      let duration = normalizeDurationSeconds(s.duration);
-      if (!(duration > 0) || durationLooksBogus(duration, s.fileSize)) {
-        const est = estimateDurationFromSize(s.fileSize);
-        if (est > 0) {
-          duration = est;
-          durationFixed++;
-        }
-      }
+      const before = Number(s.duration) || 0;
+      const duration = sanitizeSongDuration(s.duration, s.fileSize);
+      if (duration > 0 && Math.abs(before - duration) > 2) durationFixed++;
       let audioUrl = '';
       if (s.isNative) {
         if (s.nativePath && window.Capacitor && window.Capacitor.convertFileSrc) {
@@ -3805,6 +3838,7 @@ async function initApp() {
       const coverUrl = (s.coverUrl && !String(s.coverUrl).startsWith('blob:'))
         ? s.coverUrl
         : 'logo.png';
+      const stillSuspect = durationLooksBogus(duration, s.fileSize) || (duration > 25 * 60 && (s.fileSize || 0) < 15 * 1024 * 1024);
       return {
         ...s,
         duration,
@@ -3813,7 +3847,7 @@ async function initApp() {
         audioBlob: null,
         coverBlob: null,
         _objectUrl: null,
-        _durationVerified: !!(s._durationVerified && !durationLooksBogus(duration, s.fileSize))
+        _durationVerified: !!(s._durationVerified && duration > 0 && !stillSuspect)
       };
     });
 
@@ -3821,7 +3855,9 @@ async function initApp() {
     invalidateSongMap();
     if (durationFixed > 0) {
       dbAddSongsBatch(state.songs).catch(() => {});
+      showToast(`Đã sửa thời lượng ${durationFixed} bài bị lệch`, '⏱️');
     }
+    setTimeout(() => repairDurationsInBackground(state.songs), 1600);
 
     if (demoMode) {
       await seedDemoLibrary({ force: demoReset || state.songs.length === 0 });
