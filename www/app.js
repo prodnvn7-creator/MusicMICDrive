@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 36;
+const APP_BUILD = 37;
 
 const state = {
   db: null,
@@ -53,6 +53,11 @@ function isNativeApk() {
     window.Capacitor.Plugins &&
     window.Capacitor.Plugins.MediaStoreScanner
   );
+}
+
+/** Chrome/PWA on Android cannot silently scan whole storage — only user-picked files/folders. */
+function isAndroidBrowser() {
+  return /Android/i.test(navigator.userAgent || '');
 }
 
 function buildKnownSongKeySet(songs) {
@@ -195,6 +200,7 @@ const storageInfoBadge = document.getElementById('storageInfoBadge');
 const scanAudioInput = document.getElementById('scanAudioInput');
 const scanFolderInput = document.getElementById('scanFolderInput');
 const freeFileInput = document.getElementById('freeFileInput');
+const downloadsFileInput = document.getElementById('downloadsFileInput');
 const coverPickerInput = document.getElementById('coverPickerInput');
 const scanMusicBtn = document.getElementById('scanMusicBtn');
 const scanMusicIcon = document.getElementById('scanMusicIcon');
@@ -207,6 +213,10 @@ const clearSearchBtn = document.getElementById('clearSearchBtn');
 const quickShuffleAllBtn = document.getElementById('quickShuffleAllBtn');
 const modalScanAudioBtn = document.getElementById('modalScanAudioBtn');
 const modalPickFileBtn = document.getElementById('modalPickFileBtn');
+const scanSourceModal = document.getElementById('scanSourceModal');
+const scanSourceDownloadsBtn = document.getElementById('scanSourceDownloadsBtn');
+const scanSourceFolderBtn = document.getElementById('scanSourceFolderBtn');
+const scanSourceCancelBtn = document.getElementById('scanSourceCancelBtn');
 
 // Mini Player Elements
 const miniPlayerDock = document.getElementById('miniPlayerDock');
@@ -2353,7 +2363,7 @@ function renderTrackList() {
       if (emptyStateScanBtn) emptyStateScanBtn.classList.add('hidden');
     } else {
       emptyStateEl.querySelector('h3').textContent = 'Thư viện chưa có nhạc';
-      emptyStateEl.querySelector('p').innerHTML = 'Chạm vào nút bên dưới để quét toàn bộ bài hát trong máy (<span class="text-emerald-400 font-semibold">Tải về, Zalo, Thẻ nhớ...</span>). Ứng dụng sẽ <span class="text-cyan-400 font-semibold">tự động quét và lưu vĩnh viễn</span> vào máy của bạn!';
+      emptyStateEl.querySelector('p').innerHTML = 'Lấy nhạc trong máy: vào <span class="text-emerald-400 font-semibold">Tải về / Downloads</span> (hoặc Zalo), chọn file vừa tải — <span class="text-cyan-400 font-semibold">không dùng mục Âm thanh của Google</span>.';
       if (emptyStateScanBtn) emptyStateScanBtn.classList.remove('hidden');
     }
     return;
@@ -2868,11 +2878,63 @@ function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function openScanSourceModal() {
+  if (!scanSourceModal) return;
+  scanSourceModal.classList.remove('hidden');
+  scanSourceModal.classList.add('flex');
+}
+
+function closeScanSourceModal() {
+  if (!scanSourceModal) return;
+  scanSourceModal.classList.add('hidden');
+  scanSourceModal.classList.remove('flex');
+}
+
+/** Multi-file from Files/Downloads — no audio/* filter (avoids Google Audio library). */
+function openDownloadsFilePicker() {
+  closeScanSourceModal();
+  abortScanProgress();
+  showToast('Vào Tải về / Downloads → chọn file nhạc (giữ chọn nhiều)', '📂');
+  const input = downloadsFileInput || freeFileInput;
+  if (input) setTimeout(() => input.click(), 280);
+}
+
+async function openFolderScanPicker() {
+  closeScanSourceModal();
+  beginPhoneScanProgress('Chọn thư mục Tải về / Music trên máy…');
+
+  if (!isAndroidBrowser() && 'showDirectoryPicker' in window) {
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+      try { await dbSaveSetting('libraryDirHandle', dirHandle); } catch (e) {}
+      beginPhoneScanProgress('Đang quét thư mục đã chọn…');
+      const items = await scanDirectoryRecursively(dirHandle, (found) => {
+        updateScanDiscoverCount(found);
+      });
+      if (items.length > 0) {
+        await handleAudioFiles(items);
+      } else {
+        abortScanProgress();
+        showToast('Không tìm thấy file nhạc trong thư mục này', '⚠️');
+      }
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        abortScanProgress();
+        return;
+      }
+      console.warn('showDirectoryPicker fallback:', err);
+    }
+  }
+
+  beginPhoneScanProgress('Chọn thư mục Tải về (tránh Google Drive / Âm thanh)…');
+  if (scanFolderInput) scanFolderInput.click();
+}
+
 // Native Android MediaStore — full-device audio index
 async function scanAllAudioNative() {
   if (!isNativeApk()) {
-    beginPhoneScanProgress('Chọn thư mục Bộ nhớ trong để quét cả máy…');
-    if (scanFolderInput) scanFolderInput.click();
+    openScanSourceModal();
     return;
   }
 
@@ -3059,51 +3121,24 @@ async function handleNativeSongs(nativeList, options = {}) {
 // 11. EVENT HANDLERS & BINDINGS
 // ==========================================
 function setupEventHandlers() {
-  /**
-   * Auto local-storage scan only (no cloud / Google picker).
-   * APK → MediaStore; Web/PWA → chọn thư mục bộ nhớ máy (đệ quy local).
+    /**
+   * APK → MediaStore (full device index + rescan Downloads).
+   * PWA/Chrome → user must pick Downloads files (browser cannot scan whole phone).
    */
   async function triggerLocalStorageScan() {
-    // Progress bar immediately — user always sees load from the first tap
-    beginPhoneScanProgress('Đang chuẩn bị quét toàn bộ điện thoại…');
-
-    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+    if (isNativeApk() || (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())) {
+      beginPhoneScanProgress('Đang chuẩn bị quét MediaStore trên máy…');
       await scanAllAudioNative();
       return;
     }
 
-    if ('showDirectoryPicker' in window) {
-      try {
-        beginPhoneScanProgress('Chọn Bộ nhớ trong / thẻ nhớ để quét cả máy…');
-        const dirHandle = await window.showDirectoryPicker();
-        try { await dbSaveSetting('libraryDirHandle', dirHandle); } catch (e) {}
-        beginPhoneScanProgress('Đang quét toàn bộ thư mục trên máy…');
-        const items = await scanDirectoryRecursively(dirHandle, (found) => {
-          updateScanDiscoverCount(found);
-        });
-        if (items.length > 0) {
-          await handleAudioFiles(items);
-        } else {
-          abortScanProgress();
-          showToast('Không tìm thấy file âm thanh trong thư mục này', '⚠️');
-        }
-        return;
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          abortScanProgress();
-          return;
-        }
-        console.warn('showDirectoryPicker fallback:', err);
-      }
-    }
-
-    // Fallback: webkitdirectory — keep load bar visible while system picker opens
-    beginPhoneScanProgress('Chọn Bộ nhớ trong rồi bấm Chọn tất cả…');
-    if (scanFolderInput) scanFolderInput.click();
+    // PWA / mobile browser: show chooser — do NOT auto-open Google Audio picker
+    abortScanProgress();
+    openScanSourceModal();
   }
 
   function triggerFreeFilePicker() {
-    if (freeFileInput) freeFileInput.click();
+    openDownloadsFilePicker();
   }
 
   if (scanMusicBtn) scanMusicBtn.addEventListener('click', () => triggerLocalStorageScan());
@@ -3124,6 +3159,27 @@ function setupEventHandlers() {
       optionsModal.classList.add('hidden');
       optionsModal.classList.remove('flex');
       triggerFreeFilePicker();
+    });
+  }
+
+  if (scanSourceDownloadsBtn) {
+    scanSourceDownloadsBtn.addEventListener('click', () => openDownloadsFilePicker());
+  }
+  if (scanSourceFolderBtn) {
+    scanSourceFolderBtn.addEventListener('click', () => openFolderScanPicker());
+  }
+  if (scanSourceCancelBtn) {
+    scanSourceCancelBtn.addEventListener('click', () => {
+      closeScanSourceModal();
+      abortScanProgress();
+    });
+  }
+  if (scanSourceModal) {
+    scanSourceModal.addEventListener('click', (e) => {
+      if (e.target === scanSourceModal) {
+        closeScanSourceModal();
+        abortScanProgress();
+      }
     });
   }
 
@@ -3158,6 +3214,19 @@ function setupEventHandlers() {
         freeFileInput.value = '';
       }
     });
+  }
+
+  if (downloadsFileInput) {
+    downloadsFileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        beginPhoneScanProgress(`Đang nạp ${e.target.files.length} file từ máy…`);
+        handleAudioFiles(e.target.files);
+        downloadsFileInput.value = '';
+      } else {
+        abortScanProgress();
+      }
+    });
+    downloadsFileInput.addEventListener('cancel', () => abortScanProgress());
   }
 
   // Drag and Drop (folders or files)
