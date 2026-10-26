@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 39;
+const APP_BUILD = 40;
 
 const state = {
   db: null,
@@ -1556,16 +1556,59 @@ function syncMediaSessionPositionState() {
 const SUPPORTED_AUDIO_EXTENSIONS = [
   '.mp3', '.wav', '.wave', '.flac', '.m4a', '.aac', '.ogg', '.oga',
   '.opus', '.wma', '.alac', '.aiff', '.aif', '.caf', '.weba',
-  '.m4b', '.m4p', '.m4r', '.3gp', '.amr', '.awb'
+  '.m4b', '.m4p', '.m4r', '.3gp', '.amr', '.awb', '.mpga', '.mp2'
 ];
+
+/** Android Downloads often rename to "song.mp3 (1)" — still audio. */
+function fileNameLooksAudio(name) {
+  const n = String(name || '').toLowerCase().trim();
+  if (!n) return false;
+  if (SUPPORTED_AUDIO_EXTENSIONS.some((ext) => n.endsWith(ext))) return true;
+  // "track.mp3 (1)" / "track.mp3(2)" / "track.m4a - Copy"
+  return /\.(mp3|wav|wave|flac|m4a|aac|ogg|oga|opus|wma|aiff|aif|m4b|m4r|3gp|amr|mpga|mp2)(\s*\(\d+\))?(\s*-\s*copy)?$/i.test(n)
+    || /\.(mp3|wav|flac|m4a|aac|ogg|opus)(\s*\(\d+\))/i.test(n);
+}
 
 function isAudioFile(file) {
   if (!file) return false;
+  // Allow passing a bare file name string (drag/drop helpers)
+  if (typeof file === 'string') return fileNameLooksAudio(file);
+
   const mime = (file.type || '').toLowerCase();
   if (mime.startsWith('audio/')) return true;
   if (mime === 'application/ogg' || mime === 'application/x-ogg') return true;
-  const name = (file.name || '').toLowerCase();
-  return SUPPORTED_AUDIO_EXTENSIONS.some(ext => name.endsWith(ext));
+  // Some Android builds tag M4A/AAC as mp4/octet-stream
+  if (mime === 'video/mp4' || mime === 'application/mp4' || mime === 'audio/mp4') {
+    if (fileNameLooksAudio(file.name) || !file.name) return true;
+  }
+  if (fileNameLooksAudio(file.name)) return true;
+  return false;
+}
+
+/** Peek magic bytes — Android SAF often strips extension / leaves empty MIME. */
+async function sniffIsAudioFile(file) {
+  if (!file || !(file.size > 512)) return false;
+  if (isAudioFile(file)) return true;
+  try {
+    const buf = await file.slice(0, 16).arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    // ID3… / MP3 frame sync / fLaC / RIFF / OggS / ftyp (M4A/MP4)
+    if (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) return true;
+    if (u8[0] === 0xFF && (u8[1] & 0xE0) === 0xE0) return true;
+    if (u8[0] === 0x66 && u8[1] === 0x4C && u8[2] === 0x61 && u8[3] === 0x43) return true;
+    if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46) return true;
+    if (u8[0] === 0x4F && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53) return true;
+    if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) return true;
+  } catch (e) {}
+  // Last resort: Android Downloads with blank MIME / no extension
+  const mime = (file.type || '').toLowerCase();
+  const n = (file.name || '').toLowerCase();
+  if (/\.(jpg|jpeg|png|gif|webp|heic|pdf|apk|zip|rar|7z|doc|docx|xls|xlsx|txt|html|css|js)$/i.test(n)) {
+    return false;
+  }
+  const generic = !mime || mime === 'application/octet-stream' || mime === 'application/download';
+  if (generic && file.size >= 40000 && file.size <= 80 * 1024 * 1024) return true;
+  return false;
 }
 
 // ── Scan Progress UI helpers ─────────────────────────────────
@@ -1672,7 +1715,9 @@ async function scanDirectoryRecursively(dirHandle, onProgress) {
       if (entry.kind === 'file') {
         try {
           const file = await entry.getFile();
-          if (isAudioFile(file)) {
+          let ok = isAudioFile(file);
+          if (!ok && file.size >= 40000) ok = await sniffIsAudioFile(file);
+          if (ok) {
             items.push({ file, handle: entry });
             if (onProgress && (items.length % 10 === 0)) onProgress(items.length);
           }
@@ -1953,22 +1998,38 @@ async function handleAudioFiles(files) {
     beginPhoneScanProgress('Đang lọc file nhạc trên máy…');
   }
 
-  const raw = Array.from(files);
+  const raw = Array.from(files || []);
+  if (raw.length === 0) {
+    abortScanProgress();
+    showToast('Bạn chưa chọn file nào', '⚠️');
+    return;
+  }
+
   const items = raw.map((x) => {
     if (x && x.file instanceof Blob) return { file: x.file, handle: x.handle || null };
     return { file: x, handle: null };
-  }).filter((x) => x.file);
+  }).filter((x) => x.file && (x.file.size > 0 || x.file.name));
 
+  // Pass 1: name/MIME. Pass 2: sniff headers (Android often strips .mp3)
   let validItems = items.filter((x) => isAudioFile(x.file));
-  if (validItems.length === 0) {
-    validItems = items.filter((x) => {
-      const name = (x.file.name || '').toLowerCase();
-      return SUPPORTED_AUDIO_EXTENSIONS.some((ext) => name.endsWith(ext));
-    });
+  if (validItems.length < items.length) {
+    const maybe = items.filter((x) => !isAudioFile(x.file));
+    for (let i = 0; i < maybe.length; i++) {
+      if (i > 0 && i % 12 === 0) await yieldToUI();
+      try {
+        if (await sniffIsAudioFile(maybe[i].file)) validItems.push(maybe[i]);
+      } catch (e) {}
+    }
   }
   if (validItems.length === 0) {
     abortScanProgress();
-    showToast('Không tìm thấy file nhạc nào', '⚠️');
+    const sample = (items[0] && items[0].file && items[0].file.name) ? items[0].file.name : '';
+    showToast(
+      sample
+        ? `Không nhận ra nhạc (${items.length} file). Thử chọn file .mp3/.m4a trong Tải về`
+        : 'Không tìm thấy file nhạc nào',
+      '⚠️'
+    );
     return;
   }
 
