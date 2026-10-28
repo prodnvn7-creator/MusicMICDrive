@@ -11,7 +11,7 @@ const DB_VERSION = 3;
 const STORE_NAME = 'songs';
 const SETTINGS_STORE = 'settings';
 /** Bump together with version.json + sw.js CACHE_NAME when shipping UI fixes */
-const APP_BUILD = 41;
+const APP_BUILD = 42;
 
 const state = {
   db: null,
@@ -449,7 +449,10 @@ async function opfsReadTrack(name) {
   return fh.getFile();
 }
 
-/** Resolve a playable URL without keeping every track decoded in RAM */
+/**
+ * Prefer OPFS (đã copy trong máy trình duyệt) trước fileHandle Downloads.
+ * Chrome chỉ giữ quyền "Tải về" đến khi đóng tab — OPFS = không hỏi lại.
+ */
 async function ensureSongPlayable(song) {
   if (!song) return null;
   if (song.isNative) {
@@ -463,21 +466,6 @@ async function ensureSongPlayable(song) {
   if (song._objectUrl) return song._objectUrl;
 
   try {
-    if (song.fileHandle && typeof song.fileHandle.getFile === 'function') {
-      try {
-        const perm = await song.fileHandle.queryPermission({ mode: 'read' });
-        if (perm !== 'granted') {
-          const next = await song.fileHandle.requestPermission({ mode: 'read' });
-          if (next !== 'granted') throw new Error('permission denied');
-        }
-      } catch (e) {
-        // Older engines may not support queryPermission
-      }
-      const file = await song.fileHandle.getFile();
-      song._objectUrl = URL.createObjectURL(file);
-      song.audioUrl = song._objectUrl;
-      return song._objectUrl;
-    }
     if (song.opfsName) {
       const file = await opfsReadTrack(song.opfsName);
       song._objectUrl = URL.createObjectURL(file);
@@ -492,6 +480,33 @@ async function ensureSongPlayable(song) {
     if (song.audioBlob instanceof Blob) {
       song._objectUrl = URL.createObjectURL(song.audioBlob);
       song.audioUrl = song._objectUrl;
+      return song._objectUrl;
+    }
+    if (song.fileHandle && typeof song.fileHandle.getFile === 'function') {
+      try {
+        if (typeof song.fileHandle.queryPermission === 'function') {
+          let perm = await song.fileHandle.queryPermission({ mode: 'read' });
+          if (perm !== 'granted' && typeof song.fileHandle.requestPermission === 'function') {
+            perm = await song.fileHandle.requestPermission({ mode: 'read' });
+            if (perm !== 'granted') throw new Error('permission denied');
+            // Vừa Cho phép → copy OPFS ngay để lần sau không hỏi nữa
+            queueOpfsBackupForLibrary();
+          }
+        }
+      } catch (e) {
+        if (e && e.message === 'permission denied') throw e;
+      }
+      const file = await song.fileHandle.getFile();
+      song._objectUrl = URL.createObjectURL(file);
+      song.audioUrl = song._objectUrl;
+      // Copy nền bài này + cả thư viện còn thiếu OPFS
+      try {
+        if (!song.opfsName) {
+          song._sessionFile = file;
+          persistSongsToOpfsBackground([song]).catch(() => {});
+        }
+        queueOpfsBackupForLibrary();
+      } catch (e) {}
       return song._objectUrl;
     }
   } catch (e) {
@@ -2063,7 +2078,6 @@ async function handleAudioFiles(files) {
 
   const baseTs = Date.now();
   const newSongs = [];
-  const needOpfs = [];
 
   for (let i = 0; i < uniqueItems.length; i++) {
     const { file, handle } = uniqueItems[i];
@@ -2096,7 +2110,8 @@ async function handleAudioFiles(files) {
       _objectUrl: null,
       fileHandle: handle || null,
       opfsName: null,
-      _sessionFile: handle ? null : file,
+      // Giữ blob phiên để copy OPFS ngay (kể cả khi có handle Downloads)
+      _sessionFile: file instanceof Blob ? file : null,
       coverBlob: null,
       coverUrl: 'logo.png',
       fileName: file.name,
@@ -2105,7 +2120,6 @@ async function handleAudioFiles(files) {
       _durationVerified: duration > 0 && !durationLooksBogus(duration, file.size)
     };
     newSongs.push(song);
-    if (!handle) needOpfs.push(song);
 
     if (i % 12 === 0 || i === total - 1) {
       updateScanProgress(i + 1, total, title);
@@ -2136,14 +2150,31 @@ async function handleAudioFiles(files) {
 
   hideScanProgress(newSongs.length, total);
 
-  if (withHandles === total) {
-    showToast(`Đã lưu ${saveResult.ok} bài (thư mục) — thoát app vẫn còn`, '💾');
-  } else if (needOpfs.length > 0) {
-    showToast(`Đã hiện ${newSongs.length} bài — đang lưu nền để không mất…`, '💾');
-    persistSongsToOpfsBackground(needOpfs);
+  // Copy OPFS ngay trong phiên "Cho phép" → lần sau phát từ OPFS, không hỏi lại
+  const toProtect = newSongs.filter((s) => !s.opfsName && s._sessionFile);
+  if (toProtect.length > 0) {
+    showToast(
+      withHandles === total
+        ? `Đã lưu ${saveResult.ok} bài — đang copy bền trong app…`
+        : `Đã hiện ${newSongs.length} bài — đang lưu nền để không mất…`,
+      '💾'
+    );
+    persistSongsToOpfsBackground(toProtect);
   } else if (saveResult.ok > 0) {
     showToast(`Đã lưu ${saveResult.ok} bài`, '💾');
   }
+}
+
+let _opfsBackupQueued = false;
+/** Queue one library-wide OPFS backup (no permission prompt — query only). */
+function queueOpfsBackupForLibrary() {
+  if (_opfsBackupQueued) return;
+  _opfsBackupQueued = true;
+  setTimeout(() => {
+    _opfsBackupQueued = false;
+    const missing = state.songs.filter((s) => s && !s.isNative && !s.isDemo && !s.opfsName);
+    if (missing.length) persistSongsToOpfsBackground(missing).catch(() => {});
+  }, 400);
 }
 
 /** One-at-a-time OPFS copy — cooler phone than blasting 300 writes */
@@ -2154,11 +2185,26 @@ async function persistSongsToOpfsBackground(songs) {
     return;
   }
   let done = 0;
+  const total = songs.length;
   for (let i = 0; i < songs.length; i++) {
     const song = songs[i];
-    if (!song || song.opfsName || song.fileHandle) continue;
-    const src = song._sessionFile;
+    if (!song || song.opfsName) continue;
+
+    let src = song._sessionFile;
+    if (!(src instanceof Blob) && song.fileHandle && typeof song.fileHandle.getFile === 'function') {
+      try {
+        // Chỉ dùng quyền đã có — KHÔNG requestPermission trong nền (tránh hỏi lại)
+        if (typeof song.fileHandle.queryPermission === 'function') {
+          const p = await song.fileHandle.queryPermission({ mode: 'read' });
+          if (p !== 'granted') continue;
+        }
+        src = await song.fileHandle.getFile();
+      } catch (e) {
+        continue;
+      }
+    }
     if (!(src instanceof Blob)) continue;
+
     try {
       while (document.hidden) {
         await new Promise((r) => setTimeout(r, 600));
@@ -2167,8 +2213,8 @@ async function persistSongsToOpfsBackground(songs) {
       song._sessionFile = null;
       await dbAddSong(song);
       done++;
-      if (done % 15 === 0 || done === songs.length) {
-        showToast(`Đã bảo vệ lưu ${done}/${songs.length} bài`, '💾');
+      if (done % 15 === 0 || done === total) {
+        showToast(`Đã bảo vệ lưu ${done}/${total} bài`, '💾');
       }
     } catch (e) {
       console.warn('OPFS bg fail', song.id, e);
@@ -2176,7 +2222,7 @@ async function persistSongsToOpfsBackground(songs) {
     await new Promise((r) => setTimeout(r, 40));
     await yieldToUI();
   }
-  if (done > 0) showToast(`Lưu bền xong ${done} bài — thoát app vẫn còn`, '✅');
+  if (done > 0) showToast(`Lưu bền xong ${done} bài — thoát app không hỏi lại`, '✅');
 }
 
 /** Re-attach handles / rebuild library from saved folder (Chrome/Android PWA) */
@@ -2193,7 +2239,10 @@ async function reindexFromSavedDirHandle(options = {}) {
   try {
     if (typeof dirHandle.queryPermission === 'function') {
       let perm = await dirHandle.queryPermission({ mode: 'read' });
-      if (perm !== 'granted' && typeof dirHandle.requestPermission === 'function') {
+      // Boot im lặng: chỉ dùng nếu Chrome vẫn còn grant trong phiên — KHÔNG gọi
+      // requestPermission (hộp "Cho phép xem tệp" hiện lại mỗi lần mở).
+      if (perm !== 'granted') {
+        if (silent || typeof dirHandle.requestPermission !== 'function') return 0;
         perm = await dirHandle.requestPermission({ mode: 'read' });
       }
       if (perm !== 'granted') return 0;
@@ -2285,6 +2334,8 @@ async function reindexFromSavedDirHandle(options = {}) {
     hideScanProgress(toAdd.length || attached, items.length);
     showToast(`Khôi phục OK · ${state.songs.length} bài`, '💾');
   }
+  // Có quyền đọc thư mục trong phiên này → copy OPFS để lần sau không hỏi
+  queueOpfsBackupForLibrary();
   return toAdd.length + attached;
 }
 
@@ -3028,6 +3079,7 @@ async function openFolderScanPicker() {
       });
       if (items.length > 0) {
         await handleAudioFiles(items);
+        queueOpfsBackupForLibrary();
       } else {
         abortScanProgress();
         showToast('Không tìm thấy file nhạc trong thư mục này', '⚠️');
@@ -3763,8 +3815,9 @@ function isRunningStandalone() {
   );
 }
 
-/** Safari has no Chrome install button — teach Add to Home Screen once.
- *  Preview on PC: open index.html?iosGuide=1
+/** Safari has no Chrome install button — teach Add to Home Screen **once only**.
+ *  Cờ mm_ios_install_v1 ghi ngay khi hiện → không nhắc lại sau reload / mở lại.
+ *  Preview on PC: open index.html?iosGuide=1 (không ghi cờ)
  */
 function setupIosInstallHint() {
   const sheet = document.getElementById('iosInstallSheet');
@@ -3772,19 +3825,23 @@ function setupIosInstallHint() {
 
   const params = new URLSearchParams(window.location.search);
   const forcePreview = params.get('iosGuide') === '1' || params.get('ios') === '1';
+  const FLAG = 'mm_ios_install_v1';
+
+  const markSeen = () => {
+    if (forcePreview) return;
+    try { localStorage.setItem(FLAG, '1'); } catch (e) {}
+  };
 
   if (!forcePreview) {
     if (!isIosDevice() || isRunningStandalone()) return;
     try {
-      if (localStorage.getItem('mm_ios_install_v1') === '1') return;
+      if (localStorage.getItem(FLAG) === '1') return;
     } catch (e) {}
   }
 
   const dismiss = () => {
     sheet.classList.add('hidden');
-    if (!forcePreview) {
-      try { localStorage.setItem('mm_ios_install_v1', '1'); } catch (e) {}
-    }
+    markSeen();
   };
 
   const closeBtn = document.getElementById('iosInstallClose');
@@ -3796,7 +3853,12 @@ function setupIosInstallHint() {
   });
 
   const show = () => {
-    if (!forcePreview && isRunningStandalone()) return;
+    if (!forcePreview && isRunningStandalone()) {
+      markSeen();
+      return;
+    }
+    // Ghi cờ ngay khi hiện — 1 lần thôi, không nhắc lại dù user chưa bấm Đã hiểu
+    markSeen();
     sheet.classList.remove('hidden');
   };
 
@@ -3940,8 +4002,14 @@ async function initApp() {
     state.songs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     invalidateSongMap();
     if (durationFixed > 0) {
+      // Silent persist — không toast mỗi lần mở app (chỉ 1 lần nếu chưa từng báo)
       dbAddSongsBatch(state.songs).catch(() => {});
-      setTimeout(() => showToast(`Đã sửa ${durationFixed} thời lượng bài hát`, '⏱️'), 500);
+      try {
+        if (localStorage.getItem('mm_duration_fix_toast_v1') !== '1') {
+          localStorage.setItem('mm_duration_fix_toast_v1', '1');
+          setTimeout(() => showToast(`Đã sửa ${durationFixed} thời lượng bài hát`, '⏱️'), 500);
+        }
+      } catch (e) {}
     }
     setTimeout(() => repairDurationsInBackground(state.songs), 900);
 
@@ -3963,24 +4031,22 @@ async function initApp() {
       updateUIWithSong(state.songs[0]);
     }
 
-    // Chrome/Android + iOS PWA: restore from saved folder handle (no re-copy)
+    // PWA: chỉ reindex nếu queryPermission đã granted (không hiện hộp Cho phép lúc boot).
+    // Bài đã có opfsName phát bình thường không cần Downloads.
     if (!demoMode && !isNativeApk()) {
-      const needRestore = state.songs.length === 0
-        || state.songs.some((s) => !s.isNative && !s.fileHandle && !s.opfsName && !s.isDemo);
-      if (needRestore || state.songs.length === 0) {
-      setTimeout(() => {
-          reindexFromSavedDirHandle({ silent: state.songs.length > 0 }).then((n) => {
+      const allHaveOpfs = state.songs.length > 0
+        && state.songs.every((s) => s.isNative || s.isDemo || s.opfsName);
+      if (!allHaveOpfs) {
+        setTimeout(() => {
+          reindexFromSavedDirHandle({ silent: true }).then((n) => {
             if (n > 0 && state.songs.length > 0 && state.currentIndex < 0) {
               state.currentIndex = 0;
               updateUIWithSong(state.songs[0]);
             }
+            queueOpfsBackupForLibrary();
           }).catch(() => {});
         }, 500);
-      } else if (state.songs.length > 0) {
-        showToast(`Thư viện: ${state.songs.length} bài`, '💾');
       }
-    } else if (state.songs.length > 0) {
-      showToast(`Thư viện: ${state.songs.length} bài`, '💾');
     }
 
     // APK only: MediaStore empty → one scan (never every launch)
