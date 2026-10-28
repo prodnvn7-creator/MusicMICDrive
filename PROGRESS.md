@@ -44,9 +44,9 @@
 3. Thoát app → mở lại: phát bình thường, **không** bị hỏi lại quyền Downloads (nếu đã có `opfsName`).
 4. Nên **Cài đặt ứng dụng** (PWA standalone) — Chrome giữ quyền FS tốt hơn trên app đã cài; OPFS vẫn là đường chính để khỏi phụ thuộc hộp thoại.
 
-### Chưa ship remote (nếu cần)
+### Remote
 
-- Bản **42** đang ở máy local + `www/`. Push GitHub Pages khi user yêu cầu để điện thoại nhận update.
+- Đã push **build 42** lên `origin/main` (2026-10-28). GitHub Pages sẽ phục vụ bản mới sau khi deploy xong (~1–2 phút).
 
 ---
 
